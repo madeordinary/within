@@ -1,0 +1,4 @@
+# Markdown hard breaks and unified-diff context markers are intentional spaces.
+*.md whitespace=-blank-at-eol
+*.patch -whitespace
+*.png binary

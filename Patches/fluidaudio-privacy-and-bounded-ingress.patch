@@ -1,0 +1,123 @@
+--- a/Sources/FluidAudio/Shared/AppLogger.swift
++++ b/Sources/FluidAudio/Shared/AppLogger.swift
+@@ -61,29 +61,9 @@
+     }
+ 
+     // MARK: - Console Mirroring
+-    private func log(_ level: Level, _ message: String) {
+-        #if DEBUG
+-        logToConsole(level, message)
+-        #else
+-        switch level {
+-        case .debug:
+-            osLogger.debug("\(message)")
+-        case .info:
+-            osLogger.info("\(message)")
+-        case .notice:
+-            osLogger.notice("\(message)")
+-        case .warning:
+-            osLogger.warning("\(message)")
+-            logToConsole(level, message)  // Also log warnings to console in release
+-        case .error:
+-            osLogger.error("\(message)")
+-            logToConsole(level, message)  // Also log errors to console in release
+-        case .fault:
+-            osLogger.fault("\(message)")
+-            logToConsole(level, message)  // Also log faults to console in release
+-        }
+-        #endif
+-    }
++    // Within privacy patch: SDK messages may contain transcript content or file paths.
++    // Keep every SDK log sink disabled in debug AND release builds.
++    private func log(_ level: Level, _ message: String) {}
+ 
+     private func logToConsole(_ level: Level, _ message: String) {
+         let capturedLevel = level
+--- a/Sources/FluidAudio/ASR/Parakeet/SlidingWindow/SlidingWindowAsrManager.swift
++++ b/Sources/FluidAudio/ASR/Parakeet/SlidingWindow/SlidingWindowAsrManager.swift
+@@ -211,6 +211,29 @@
+         }
+ 
+         logger.info("Sliding-window ASR engine started successfully")
++    }
++
++    // Within patch: a synchronous-to-the-caller, serial ingress path. The host
++    // uses one consumer and a bounded queue, never the SDK's unbounded input stream.
++    public func withinBegin() async throws {
++        try config.validate()
++        guard asrManager != nil else { throw ASRError.notInitialized }
++        try await reset()
++    }
++
++    public func withinAppendSamples(_ samples: [Float]) async throws {
++        guard samples.count <= 16000 else { throw SlidingWindowAsrError.bufferOverflow }
++        try Task.checkCancellation()
++        await appendSamplesAndProcess(samples)
++        if let error = lastWindowError { throw error }
++        try Task.checkCancellation()
++    }
++
++    public func withinFinish() async throws -> String {
++        try Task.checkCancellation()
++        await flushRemaining()
++        if let error = lastWindowError { throw error }
++        return try await finish()
+     }
+ 
+     /// Stream audio data for transcription
+--- a/Package.swift
++++ b/Package.swift
+@@ -25,7 +25,6 @@
+             dependencies: [
+                 "FastClusterWrapper",
+                 "MachTaskSelfWrapper",
+-                "NemoTextProcessing",
+             ],
+             path: "Sources/FluidAudio",
+             exclude: ["ASR/Parakeet/Unified/benchmark.md"],
+@@ -34,17 +33,7 @@
+                 .process("TTS/LuxTts/G2p/Resources")
+             ]
+         ),
+-        // Byte-exact NeMo text normalization (FST engine, all 7 languages).
+-        // Prebuilt xcframework from FluidInference/text-processing-rs v0.3.1
+-        // (macOS, iOS, iOS Simulator and Mac Catalyst slices).
+-        // Always linked on tools < 6.2; Package@swift-6.2.swift exposes it as
+-        // the opt-out `NemoTextProcessing` trait (#880, #888).
+-        .binaryTarget(
+-            name: "NemoTextProcessing",
+-            url:
+-                "https://github.com/FluidInference/text-processing-rs/releases/download/v0.3.1/NemoTextProcessing.xcframework.zip",
+-            checksum: "5fa8c10d4ec26c1bb2413125f351a7222a4c68a23b74476680fbada7e26fc6aa"
+-        ),
++        // Within uses local ASR only; do not resolve the unused TTS binary.
+         .target(
+             name: "FastClusterWrapper",
+             path: "Sources/FastClusterWrapper",
+--- a/Package@swift-6.2.swift
++++ b/Package@swift-6.2.swift
+@@ -44,7 +44,6 @@
+             dependencies: [
+                 "FastClusterWrapper",
+                 "MachTaskSelfWrapper",
+-                .target(name: "NemoTextProcessing", condition: .when(traits: ["NemoTextProcessing"])),
+             ],
+             path: "Sources/FluidAudio",
+             exclude: ["ASR/Parakeet/Unified/benchmark.md"],
+@@ -53,15 +52,7 @@
+                 .process("TTS/LuxTts/G2p/Resources")
+             ]
+         ),
+-        // Byte-exact NeMo text normalization (FST engine, all 7 languages).
+-        // Prebuilt xcframework from FluidInference/text-processing-rs v0.3.1
+-        // (macOS, iOS, iOS Simulator and Mac Catalyst slices).
+-        .binaryTarget(
+-            name: "NemoTextProcessing",
+-            url:
+-                "https://github.com/FluidInference/text-processing-rs/releases/download/v0.3.1/NemoTextProcessing.xcframework.zip",
+-            checksum: "5fa8c10d4ec26c1bb2413125f351a7222a4c68a23b74476680fbada7e26fc6aa"
+-        ),
++        // Within uses local ASR only; do not resolve the unused TTS binary.
+         .target(
+             name: "FastClusterWrapper",
+             path: "Sources/FastClusterWrapper",
