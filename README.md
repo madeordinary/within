@@ -1,6 +1,8 @@
 # Within, by Made Ordinary
 
-<img src="docs/brand/within-logo.png" alt="Within" width="180">
+<p align="center">
+  <img src="docs/brand/within-logo.png" alt="Within" width="180">
+</p>
 
 Native macOS dictation with on-device transcription and explicit control over recording, insertion, and copying.
 
