@@ -1,7 +1,7 @@
 .DS_Store
 .build/
 build/
-Vendor/
+/Vendor/
 .development/
 .swiftpm/
 outputs/reviews/*-prompt.md
@@ -19,3 +19,20 @@ __pycache__/
 *.wav
 *.mp3
 *.m4a
+
+# Personal notes and raw evidence: never part of the shared project bank.
+.private/
+memory-bank.local/
+*.log
+*.jsonl
+
+# Per-contributor agent configuration, hook activation, and session data.
+# Shared .agents/skills/ and .claude/commands/ remain version controlled.
+.codex/
+.claude/settings.json
+.claude/settings.local.json
+.claude/CLAUDE.local.md
+.claude/projects/
+.claude/sessions/
+.claude/history*
+CLAUDE.local.md
