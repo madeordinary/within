@@ -1,11 +1,32 @@
+# Local configuration and working material are private by default.
+/.*
+!/.gitignore
+!/.gitattributes
+!/.github/
+/AGENTS.md
+/CLAUDE.md
+/CLAUDE.local.md
+/memory-bank*/
+/outputs/
+/spikes/
+/hooks/
+/bin/
+/Vendor/
+/build/
+
+# Only reviewed contributor documentation is public.
+/docs/*
+!/docs/ARCHITECTURE.md
+!/docs/PRIVACY.md
+!/docs/VALIDATION.md
+!/docs/PUBLICATION.md
+!/docs/brand/
+/docs/brand/*
+!/docs/brand/within-logo.png
+
 .DS_Store
 .build/
-build/
-/Vendor/
-.development/
 .swiftpm/
-outputs/reviews/*-prompt.md
-outputs/reviews/*.json
 *.xcuserstate
 __pycache__/
 *.pyc
@@ -19,20 +40,5 @@ __pycache__/
 *.wav
 *.mp3
 *.m4a
-
-# Personal notes and raw evidence: never part of the shared project bank.
-.private/
-memory-bank.local/
 *.log
 *.jsonl
-
-# Per-contributor agent configuration, hook activation, and session data.
-# Shared .agents/skills/ and .claude/commands/ remain version controlled.
-.codex/
-.claude/settings.json
-.claude/settings.local.json
-.claude/CLAUDE.local.md
-.claude/projects/
-.claude/sessions/
-.claude/history*
-CLAUDE.local.md
