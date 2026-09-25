@@ -94,7 +94,8 @@ final class AppModel: ObservableObject {
         }
         capture.onConfigurationChanged = { [weak self] in
             guard let self, phase == .recording else { return }
-            forcedRecovery = "The microphone changed or disconnected. Review the words captured before it stopped."; stop(cause: .inputChanged)
+            lastErrorCode = "audio_input_interrupted"
+            forcedRecovery = "Audio input was interrupted. Review the words captured before it stopped."; stop(cause: .inputChanged)
         }
         registerShortcut()
         refreshPermissions()
@@ -196,6 +197,7 @@ final class AppModel: ObservableObject {
         }
         guard let id = session.begin() else { return }
         stopDiagnostics.begin()
+        capture.resetDiagnostics()
         trial.discard(); workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
         notify()
         shortcut.monitorEscape { [weak self] in
@@ -229,7 +231,11 @@ final class AppModel: ObservableObject {
                 }
                 if ring.status == 2 { forcedRecovery = "Recording stopped because speech processing fell behind. These are the words captured before the stop." }
                 if phase == .recording { _ = session.stopped(id) }
-                if text.isEmpty { session.finish(id); message = "No speech detected. Try again when you’re ready."; releaseTarget(); announce(message) }
+                if text.isEmpty {
+                    session.finish(id)
+                    message = forcedRecovery == nil ? "No speech detected. Try again when you’re ready." : "Recording stopped before any words were captured. Check the microphone and try again."
+                    releaseTarget(); announce(message)
+                }
                 else if practice {
                     UserDefaults.standard.set(true, forKey: "setupComplete")
                     practiceText += (practiceText.isEmpty ? "" : "\n") + text
@@ -314,7 +320,8 @@ final class AppModel: ObservableObject {
         stopDiagnostics.record(RecordingStopDiagnostic(cause: cause, phase: phase,
             hardwareChord: hardwareChord ?? shortcut.chordState(alternate: alternateShortcut),
             sessionChord: shortcut.chordState(alternate: alternateShortcut, source: .combinedSessionState),
-            eventListeningAllowed: CGPreflightListenEventAccess()))
+            eventListeningAllowed: CGPreflightListenEventAccess(),
+            audioConfiguration: capture.lastConfigurationChange))
     }
     private func deliver(_ text: String, id: UUID) async {
         guard session.isCurrent(id), trial.begin(text: text) else { return }

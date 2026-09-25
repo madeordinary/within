@@ -29,6 +29,24 @@ public enum RecordingStopCause: String, Encodable {
     case systemBoundary = "system_boundary"
 }
 
+/// Compare the active input with the capture's starting configuration without exporting identities.
+public struct AudioConfigurationObservation: Encodable {
+    public let engineRunning: Bool
+    public let deviceUnchanged: Bool
+    public let deviceAvailable: Bool
+    public let inputFormatUnchanged: Bool
+    public let tapFormatUnchanged: Bool
+    public var requiresStop: Bool {
+        !(engineRunning && deviceUnchanged && deviceAvailable && inputFormatUnchanged && tapFormatUnchanged)
+    }
+    public init(engineRunning: Bool, deviceUnchanged: Bool, deviceAvailable: Bool,
+                inputFormatUnchanged: Bool, tapFormatUnchanged: Bool) {
+        self.engineRunning = engineRunning; self.deviceUnchanged = deviceUnchanged
+        self.deviceAvailable = deviceAvailable; self.inputFormatUnchanged = inputFormatUnchanged
+        self.tapFormatUnchanged = tapFormatUnchanged
+    }
+}
+
 /// One in-memory observation per session. No key history, text, audio, or identities.
 public struct RecordingStopDiagnostic: Encodable {
     public let cause: RecordingStopCause
@@ -36,10 +54,13 @@ public struct RecordingStopDiagnostic: Encodable {
     public let hardwareChord: ShortcutChordState
     public let sessionChord: ShortcutChordState
     public let eventListeningAllowed: Bool
+    public let audioConfiguration: AudioConfigurationObservation?
     public init(cause: RecordingStopCause, phase: DictationPhase, hardwareChord: ShortcutChordState,
-                sessionChord: ShortcutChordState, eventListeningAllowed: Bool) {
+                sessionChord: ShortcutChordState, eventListeningAllowed: Bool,
+                audioConfiguration: AudioConfigurationObservation? = nil) {
         self.cause = cause; self.phase = phase.rawValue; self.hardwareChord = hardwareChord
         self.sessionChord = sessionChord; self.eventListeningAllowed = eventListeningAllowed
+        self.audioConfiguration = audioConfiguration
     }
 }
 
@@ -56,7 +77,7 @@ public struct RecordingStopTracker {
 /// Closed schema: callers supply categories, never exception descriptions,
 /// device names, paths, destination identities, audio, or transcript text.
 public struct DiagnosticsReport: Encodable {
-    public let schema = 2
+    public let schema = 3
     public let appVersion: String
     public let macOSVersion: String
     public let architecture: String

@@ -72,20 +72,39 @@ final class WorkflowTests: XCTestCase {
         let held = ShortcutChordState(controlHeld: true, shiftHeld: true, triggerHeld: true)
         let released = ShortcutChordState(controlHeld: true, shiftHeld: true, triggerHeld: false)
         let observation = RecordingStopDiagnostic(cause: .holdWatchdog, phase: .recording,
-            hardwareChord: released, sessionChord: held, eventListeningAllowed: false)
+            hardwareChord: released, sessionChord: held, eventListeningAllowed: false,
+            audioConfiguration: AudioConfigurationObservation(engineRunning: true,
+                deviceUnchanged: true, deviceAvailable: true, inputFormatUnchanged: true, tapFormatUnchanged: true))
         let report = DiagnosticsReport(appVersion: "test", macOSVersion: "test", architecture: "arm64",
             microphonePermission: "allowed", accessibilityPermission: true, shortcutRegistered: true,
             microphoneSelection: "system_default", modelInstalled: true, modelRevision: "test",
             lastModelCheck: "passed", lastErrorCode: "none", lastRecordingStop: observation)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.preview().utf8)) as? [String: Any])
-        XCTAssertEqual(json["schema"] as? Int, 2)
+        XCTAssertEqual(json["schema"] as? Int, 3)
         XCTAssertEqual(json["telemetry"] as? Bool, false)
         let stop = try XCTUnwrap(json["lastRecordingStop"] as? [String: Any])
-        XCTAssertEqual(Set(stop.keys), ["cause", "phase", "hardwareChord", "sessionChord", "eventListeningAllowed"])
+        XCTAssertEqual(Set(stop.keys), ["cause", "phase", "hardwareChord", "sessionChord", "eventListeningAllowed", "audioConfiguration"])
+        let configuration = try XCTUnwrap(stop["audioConfiguration"] as? [String: Any])
+        XCTAssertEqual(Set(configuration.keys), ["engineRunning", "deviceUnchanged", "deviceAvailable", "inputFormatUnchanged", "tapFormatUnchanged"])
+        XCTAssertTrue(configuration.values.allSatisfy { $0 is Bool })
         for field in ["hardwareChord", "sessionChord"] {
             let chord = try XCTUnwrap(stop[field] as? [String: Any])
             XCTAssertEqual(Set(chord.keys), ["controlHeld", "shiftHeld", "triggerHeld"])
             XCTAssertTrue(chord.values.allSatisfy { $0 is Bool })
+        }
+    }
+    func testUnchangedRunningInputSurvivesConfigurationNotification() {
+        let unchanged = AudioConfigurationObservation(engineRunning: true, deviceUnchanged: true,
+            deviceAvailable: true, inputFormatUnchanged: true, tapFormatUnchanged: true)
+        XCTAssertFalse(unchanged.requiresStop)
+    }
+    func testConfigurationChangesAndUnknownDeviceFailClosed() {
+        // Each independent loss must stop capture, even when every other property still matches.
+        for failingProperty in 0..<5 {
+            let change = AudioConfigurationObservation(engineRunning: failingProperty != 0,
+                deviceUnchanged: failingProperty != 1, deviceAvailable: failingProperty != 2,
+                inputFormatUnchanged: failingProperty != 3, tapFormatUnchanged: failingProperty != 4)
+            XCTAssertTrue(change.requiresStop, "Property \(failingProperty) must stop recording")
         }
     }
 }

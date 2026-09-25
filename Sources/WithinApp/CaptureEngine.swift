@@ -17,6 +17,9 @@ final class CaptureEngine {
     var onConfigurationChanged: (() -> Void)?
     private(set) var ring: AudioRing?
     private(set) var sampleRate: Double = 0
+    private(set) var lastConfigurationChange: AudioConfigurationObservation?
+
+    func resetDiagnostics() { lastConfigurationChange = nil }
 
     func start(deviceUID: String) throws -> AudioRing {
         guard engine == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CaptureFailure.permission }
@@ -24,11 +27,18 @@ final class CaptureEngine {
         self.engine = engine
         do {
             let input = engine.inputNode
+            guard let unit = input.audioUnit else { throw CaptureFailure.device }
             if !deviceUID.isEmpty {
-                guard let selected = Self.devices().first(where: { $0.id == deviceUID }), let unit = input.audioUnit else { throw CaptureFailure.device }
-                var device = selected.objectID
-                guard AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr else { throw CaptureFailure.device }
+                guard let selected = Self.devices().first(where: { $0.id == deviceUID }) else { throw CaptureFailure.device }
+                // Reapplying the current device is unnecessary and may reconfigure the I/O unit.
+                if Self.currentDevice(unit) != selected.objectID {
+                    var device = selected.objectID
+                    guard AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &device, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr else { throw CaptureFailure.device }
+                }
+                guard Self.currentDevice(unit) == selected.objectID else { throw CaptureFailure.device }
             }
+            guard let initialDevice = Self.currentDevice(unit), Self.deviceIsAvailable(initialDevice) else { throw CaptureFailure.device }
+            let inputFormat = input.inputFormat(forBus: 0)
             let format = input.outputFormat(forBus: 0)
             guard format.channelCount > 0, format.sampleRate >= 8000, format.sampleRate <= 192000,
                   format.commonFormat == .pcmFormatFloat32, !format.isInterleaved else { throw CaptureFailure.format }
@@ -43,14 +53,42 @@ final class CaptureEngine {
             tapInstalled = true
             engine.prepare()
             try engine.start()
-            configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self, weak engine] _ in
-                MainActor.assumeIsolated {
+            configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self, weak engine] _ in
+                // Return from AVFAudio's notification before querying or tearing down its engine.
+                Task { @MainActor [weak self, weak engine] in
                     guard let self, let engine, self.engine === engine else { return }
-                    self.onConfigurationChanged?()
+                    let input = engine.inputNode
+                    let device = input.audioUnit.flatMap { Self.currentDevice($0) }
+                    let observation = AudioConfigurationObservation(
+                        engineRunning: engine.isRunning,
+                        deviceUnchanged: device == initialDevice,
+                        deviceAvailable: device.map { Self.deviceIsAvailable($0) } ?? false,
+                        inputFormatUnchanged: input.inputFormat(forBus: 0).isEqual(inputFormat),
+                        tapFormatUnchanged: input.outputFormat(forBus: 0).isEqual(format))
+                    self.lastConfigurationChange = observation
+                    // A queued notification alone does not establish that the active input changed.
+                    // Never restart a stopped engine or switch devices within an active dictation.
+                    if observation.requiresStop { self.onConfigurationChanged?() }
                 }
             }
             return ring
         } catch { stop(); throw error }
+    }
+
+    private static func currentDevice(_ unit: AudioUnit) -> AudioDeviceID? {
+        var device = AudioDeviceID(kAudioObjectUnknown)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global,
+                                   0, &device, &size) == noErr, device != kAudioObjectUnknown else { return nil }
+        return device
+    }
+
+    private static func deviceIsAvailable(_ device: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyDeviceIsAlive,
+            mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
+        var alive: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &alive) == noErr && alive != 0
     }
 
     func stop() {
