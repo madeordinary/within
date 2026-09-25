@@ -247,7 +247,7 @@ struct MainView: View {
             Link("FluidAudio source & license", destination: URL(string: "https://github.com/FluidInference/FluidAudio")!)
             Link("Parakeet model & attribution", destination: URL(string: "https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml")!)
             Button("Review diagnostics…") { showingDiagnostics = true }
-            Text("Diagnostics contain only versions, permission categories, model status, and error codes. You can review the report before saving it.").font(.system(size: 11)).foregroundStyle(.secondary)
+            Text("Diagnostics contain versions, permission categories, model status, and content-free error and recording-stop details. You can review the report before saving it.").font(.system(size: 11)).foregroundStyle(.secondary)
             Text("Opening these links uses your browser and connects to the listed websites.").font(.system(size: 11)).foregroundStyle(.secondary)
         }
     }

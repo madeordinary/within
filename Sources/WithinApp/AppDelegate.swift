@@ -35,7 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard event.keyCode == 53, let self, self.model.phase != .ready else { return event }
                 if self.model.phase == .recovery { self.recoveryWindow?.orderOut(nil) }
-                else { self.model.cancel() }
+                else { self.model.cancel(cause: .escape) }
                 return nil
             }
             refreshStatus()

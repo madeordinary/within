@@ -27,6 +27,7 @@ final class AppModel: ObservableObject {
     @Published var soundsEnabled: Bool { didSet { UserDefaults.standard.set(soundsEnabled, forKey: "soundsEnabled") } }
     private var lastErrorCode = "none"
     private var lastModelCheck = "not_checked"
+    private var stopDiagnostics = RecordingStopTracker()
     @Published var practiceText = ""
     @Published var compatibilityPaste: Bool { didSet { UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
     @Published var mode: ActivationMode { didSet { UserDefaults.standard.set(mode.rawValue, forKey: "activationMode") } }
@@ -83,17 +84,17 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             switch gesture.down(mode: mode, isActive: isActive) {
             case .start: start(practice: false, fromShortcut: true)
-            case .stop: stop()
+            case .stop: stop(cause: .togglePress)
             case nil: break
             }
         }
         shortcut.onUp = { [weak self] in
             guard let self else { return }
-            if gesture.up() == .stop { stop() }
+            if gesture.up() == .stop { stop(cause: .hotKeyRelease) }
         }
         capture.onConfigurationChanged = { [weak self] in
             guard let self, phase == .recording else { return }
-            forcedRecovery = "The microphone changed or disconnected. Review the words captured before it stopped."; stop()
+            forcedRecovery = "The microphone changed or disconnected. Review the words captured before it stopped."; stop(cause: .inputChanged)
         }
         registerShortcut()
         refreshPermissions()
@@ -194,11 +195,12 @@ final class AppModel: ObservableObject {
             }
         }
         guard let id = session.begin() else { return }
+        stopDiagnostics.begin()
         trial.discard(); workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
         notify()
         shortcut.monitorEscape { [weak self] in
             guard let self else { return }
-            if phase == .recovery { dismissRecovery?() } else { cancel() }
+            if phase == .recovery { dismissRecovery?() } else { cancel(cause: .escape) }
         }
         worker = Task { [weak self] in
             guard let self else { return }
@@ -222,6 +224,9 @@ final class AppModel: ObservableObject {
                 try Task.checkCancellation()
                 guard session.isCurrent(id) else { throw CancellationError() }
                 capture.stop(); pulse?.cancel(); pulse = nil
+                if phase == .recording {
+                    recordStop(ring.status == 2 ? .bufferOverflow : ring.status == 3 ? .durationLimit : .streamEnded)
+                }
                 if ring.status == 2 { forcedRecovery = "Recording stopped because speech processing fell behind. These are the words captured before the stop." }
                 if phase == .recording { _ = session.stopped(id) }
                 if text.isEmpty { session.finish(id); message = "No speech detected. Try again when you’re ready."; releaseTarget(); announce(message) }
@@ -232,6 +237,7 @@ final class AppModel: ObservableObject {
                 } else { await deliver(text, id: id) }
             } catch {
                 capture.stop(); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+                if session.isCurrent(id) { recordStop(.pipelineError) }
                 await speech.cancel()
                 if session.isCurrent(id), case SpeechFailure.partial(let text) = error {
                     forcedRecovery = "Transcription stopped early. These are the words recovered before the error; part of your dictation may be missing."
@@ -265,36 +271,50 @@ final class AppModel: ObservableObject {
                 level = min(1, ring.level * 7); elapsed = Double(ring.samplesCaptured) / sampleRate
                 if ring.samplesCaptured != lastSampleCount { lastSampleCount = ring.samplesCaptured; lastAudioProgress = .now }
                 if audioFlowing, ContinuousClock.now >= lastAudioProgress.advanced(by: .seconds(5)) {
-                    forcedRecovery = "The microphone stopped sending audio. Review the words captured before it stopped."; stop(); return
+                    forcedRecovery = "The microphone stopped sending audio. Review the words captured before it stopped."; stop(cause: .audioStalled); return
                 }
                 if !audioFlowing, ring.samplesCaptured > 0 { audioFlowing = true; message = "Listening"; announce("Recording started"); playCue(start: true) }
-                if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) { cancel(reason: "No audio arrived from the microphone. Check the selected input and try again."); return }
-                if fromHoldShortcut, gesture.poll(chordHeld: shortcut.physicalChordHeld(alternate: alternateShortcut)) == .stop {
-                    stop(); return
+                if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) { cancel(reason: "No audio arrived from the microphone. Check the selected input and try again.", cause: .noAudio); return }
+                if fromHoldShortcut {
+                    let chord = shortcut.chordState(alternate: alternateShortcut)
+                    if gesture.poll(chordHeld: chord.isHeld) == .stop {
+                        stop(cause: .holdWatchdog, hardwareChord: chord); return
+                    }
                 }
-                if IsSecureEventInputEnabled() { cancel(reason: "Protected input became active. Recording canceled."); return }
-                if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { cancel(reason: "Microphone access changed. Recording canceled."); return }
+                if IsSecureEventInputEnabled() { cancel(reason: "Protected input became active. Recording canceled.", cause: .secureInput); return }
+                if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { cancel(reason: "Microphone access changed. Recording canceled.", cause: .microphonePermission); return }
                 if ring.status != 0 || ContinuousClock.now >= deadline {
                     if ring.status == 2 { forcedRecovery = "Recording stopped because speech processing fell behind. Review the captured words before using them." }
                     else { message = "Five-minute limit reached. Finishing your words…"; announce("Five-minute limit reached. Recording stopped") }
-                    stop(); return
+                    stop(cause: ring.status == 2 ? .bufferOverflow : .durationLimit); return
                 }
             }
         }
     }
-    func stop() {
+    func stop() { stop(cause: .stopButton) }
+    private func stop(cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
         guard let id = session.id else { return }
-        if phase == .preparing { cancel(); return }
+        if phase == .preparing { cancel(cause: cause); return }
         guard phase == .recording else { return }
         capture.stop(); pulse?.cancel(); pulse = nil
+        recordStop(cause, hardwareChord: hardwareChord)
         _ = session.stopped(id); playCue(start: false); level = 0; message = "Finishing on this Mac…"; notify(); announce("Recording stopped. Transcribing")
     }
-    func cancel() { cancel(reason: "Canceled. Microphone off.") }
-    private func cancel(reason: String) {
+    func cancel() { cancel(cause: .cancelButton) }
+    func cancel(cause: RecordingStopCause) { cancel(reason: "Canceled. Microphone off.", cause: cause) }
+    private func cancel(reason: String, cause: RecordingStopCause) {
         capture.stop(); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+        recordStop(cause)
         worker?.cancel(); session.cancel(); trial.discard(); releaseTarget()
         recoveryReason = nil; recoveryDetail = ""; level = 0; message = reason
         dismissRecovery?(); notify(); announce(message)
+    }
+    private func recordStop(_ cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
+        guard isActive || phase == .transcribing, stopDiagnostics.lastStop == nil else { return }
+        stopDiagnostics.record(RecordingStopDiagnostic(cause: cause, phase: phase,
+            hardwareChord: hardwareChord ?? shortcut.chordState(alternate: alternateShortcut),
+            sessionChord: shortcut.chordState(alternate: alternateShortcut, source: .combinedSessionState),
+            eventListeningAllowed: CGPreflightListenEventAccess()))
     }
     private func deliver(_ text: String, id: UUID) async {
         guard session.isCurrent(id), trial.begin(text: text) else { return }
@@ -383,6 +403,9 @@ final class AppModel: ObservableObject {
     }
     @objc private func screenLocked() { cancelForBoundary() }
     private func cancelForBoundary() {
+        // Stop audio before querying diagnostic state or invalidating the session.
+        capture.stop()
+        recordStop(.systemBoundary)
         if session.interruptForSystemBoundary() { cancel() }
         else if phase == .recovery {
             recoveryActionEpoch += 1; returning = false
@@ -432,7 +455,8 @@ final class AppModel: ObservableObject {
             macOSVersion: "\(version.majorVersion).\(version.minorVersion).\(version.patchVersion)", architecture: architecture,
             microphonePermission: permission, accessibilityPermission: accessibilityAllowed, shortcutRegistered: shortcutAvailable,
             microphoneSelection: microphoneUID.isEmpty ? "system_default" : "selected_device_identity_omitted",
-            modelInstalled: modelInstalled, modelRevision: manifest.revision, lastModelCheck: lastModelCheck, lastErrorCode: lastErrorCode).preview()
+            modelInstalled: modelInstalled, modelRevision: manifest.revision, lastModelCheck: lastModelCheck,
+            lastErrorCode: lastErrorCode, lastRecordingStop: stopDiagnostics.lastStop).preview()
     }
     func configurePreview(_ state: String) {
         modelInstalled = state != "setup"; microphoneAllowed = state != "setup"; accessibilityAllowed = state != "setup"
@@ -444,5 +468,5 @@ final class AppModel: ObservableObject {
             let id = session.begin()!; _ = session.recording(id); elapsed = 12; level = 0.45; audioFlowing = true
         }
     }
-    func shutdown() { cancel(); modelTask?.cancel(); shortcut.shutdown() }
+    func shutdown() { cancel(cause: .shutdown); modelTask?.cancel(); shortcut.shutdown() }
 }

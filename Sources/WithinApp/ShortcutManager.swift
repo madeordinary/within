@@ -34,12 +34,12 @@ final class ShortcutManager {
         if let reference { UnregisterEventHotKey(reference); self.reference = nil }
         return RegisterEventHotKey(UInt32(alternate ? kVK_ANSI_D : kVK_Space), UInt32(controlKey | shiftKey), EventHotKeyID(signature: 0x57495448, id: 1), GetApplicationEventTarget(), 0, &reference) == noErr
     }
-    func physicalChordHeld(alternate: Bool) -> Bool {
+    func chordState(alternate: Bool, source: CGEventSourceStateID = .hidSystemState) -> ShortcutChordState {
         // The release watchdog needs hardware state, not the session table
         // that also combines events posted by software.
-        let flags = CGEventSource.flagsState(.hidSystemState)
-        return flags.contains(.maskControl) && flags.contains(.maskShift)
-            && CGEventSource.keyState(.hidSystemState, key: CGKeyCode(alternate ? kVK_ANSI_D : kVK_Space))
+        let flags = CGEventSource.flagsState(source)
+        return ShortcutChordState(controlHeld: flags.contains(.maskControl), shiftHeld: flags.contains(.maskShift),
+            triggerHeld: CGEventSource.keyState(source, key: CGKeyCode(alternate ? kVK_ANSI_D : kVK_Space)))
     }
     func monitorEscape(_ action: @escaping () -> Void) {
         stopEscapeMonitor()
