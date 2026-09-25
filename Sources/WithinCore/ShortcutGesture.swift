@@ -16,4 +16,10 @@ public struct ShortcutGesture {
         defer { heldMode = nil }
         return heldMode == .hold ? .stop : nil
     }
+    /// Recover a missed key-up through the same transition as a delivered one.
+    /// Clear the held gesture as well as stopping capture so the next press works.
+    public mutating func poll(chordHeld: Bool) -> ShortcutAction? {
+        guard !chordHeld else { return nil }
+        return up()
+    }
 }

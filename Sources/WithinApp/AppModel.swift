@@ -269,7 +269,9 @@ final class AppModel: ObservableObject {
                 }
                 if !audioFlowing, ring.samplesCaptured > 0 { audioFlowing = true; message = "Listening"; announce("Recording started"); playCue(start: true) }
                 if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) { cancel(reason: "No audio arrived from the microphone. Check the selected input and try again."); return }
-                if fromHoldShortcut && !shortcut.physicalChordHeld(alternate: alternateShortcut) { stop(); return }
+                if fromHoldShortcut, gesture.poll(chordHeld: shortcut.physicalChordHeld(alternate: alternateShortcut)) == .stop {
+                    stop(); return
+                }
                 if IsSecureEventInputEnabled() { cancel(reason: "Protected input became active. Recording canceled."); return }
                 if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized { cancel(reason: "Microphone access changed. Recording canceled."); return }
                 if ring.status != 0 || ContinuousClock.now >= deadline {
