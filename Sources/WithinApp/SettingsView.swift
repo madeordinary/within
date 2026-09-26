@@ -30,7 +30,6 @@ struct MicrophoneControls: View {
 
 struct ActivationControls: View {
     @ObservedObject var model: AppModel
-    @State private var recordingShortcut = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Picker("Recording gesture", selection: $model.mode) {
@@ -39,14 +38,7 @@ struct ActivationControls: View {
             }.pickerStyle(.segmented).disabled(model.workerBusy || model.phase != .ready)
             Text(model.mode == .hold ? "Hold the shortcut while speaking. Release to finish." : "Press once to start and again to finish. No need to hold the keys.")
                 .font(.system(size: 12)).foregroundStyle(Palette.secondary)
-            HStack {
-                Text("Shortcut")
-                Spacer()
-                Text(model.shortcutLabel).font(.system(size: 14, weight: .medium, design: .monospaced))
-                    .accessibilityLabel(model.dictationShortcut.accessibilityName)
-                Button("Change…") { recordingShortcut = model.beginShortcutEditing() }
-                    .accessibilityLabel("Change dictation shortcut")
-            }.disabled(model.workerBusy || model.phase != .ready || model.editingShortcut)
+            ShortcutControl(model: model)
             if model.dictationShortcut.isModifierOnly && !model.accessibilityAllowed {
                 HStack(alignment: .top) {
                     Text("Allow Accessibility to use this modifier key outside Within. Practice can still use its Start button.")
@@ -60,6 +52,24 @@ struct ActivationControls: View {
             if !model.shortcutMessage.isEmpty { Text(model.shortcutMessage).font(.system(size: 12)).foregroundStyle(Palette.warning) }
             Text("Escape cancels. Recording stops at five minutes.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }
+    }
+}
+
+/// Shared by Home, setup and Settings so each entry point uses the same editing boundary.
+struct ShortcutControl: View {
+    @ObservedObject var model: AppModel
+    @State private var recordingShortcut = false
+    var body: some View {
+        HStack(spacing: 12) {
+            Text("Shortcut").font(.system(size: 13, weight: .medium))
+            Spacer(minLength: 8)
+            Text(model.shortcutLabel).font(.system(size: 14, weight: .medium, design: .monospaced))
+                .padding(.horizontal, 10).padding(.vertical, 7)
+                .background(Palette.tint, in: RoundedRectangle(cornerRadius: 7))
+                .accessibilityLabel(model.dictationShortcut.accessibilityName)
+            Button("Change…") { recordingShortcut = model.beginShortcutEditing() }
+                .accessibilityLabel("Change dictation shortcut")
+        }.disabled(model.workerBusy || model.phase != .ready || model.editingShortcut)
         .sheet(isPresented: $recordingShortcut, onDismiss: model.endShortcutEditing) {
             ShortcutRecorderView(model: model)
         }

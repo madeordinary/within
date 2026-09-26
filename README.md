@@ -32,11 +32,11 @@ open build/Within.app
 
 The scripts fetch a pinned FluidAudio source revision, apply the checked-in patch, and build locally. Dependency preparation requires network access. The default app signature is ad hoc; it does not establish a trusted distribution identity. Model weights are downloaded separately after choosing **Download local model** in the app.
 
-Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. Setup and Practice include a microphone selector. The default shortcut is Control–Shift–Space; choose **Change…** in setup or Settings to record another combination or a single left/right modifier, including Right Control. Modifier-only shortcuts require Accessibility for use in other apps. Shortcut editing never starts dictation. Compatibility paste is experimental and off by default.
+Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. Home, setup and Practice include a microphone selector. The default shortcut is Control–Shift–Space; choose **Change…** on Home, in setup or Settings to record another combination or a single left/right modifier, including Right Control. Modifier-only shortcuts require Accessibility for use in other apps. Shortcut editing never starts dictation. Compatibility paste is experimental and off by default.
 
 ## Using the app
 
-Within opens a Home window and appears in the Dock, Command-Tab switcher, and menu bar. **Continue setup** walks through permissions and the local model. **Try dictation** opens a temporary practice window; recording starts only when you choose **Start practice** or use the shortcut. For another app, focus its text field before using the shortcut.
+Within opens a Home window and appears in the Dock, Command-Tab switcher, and menu bar. **Continue setup** walks through permissions and the local model. **Open Practice** opens a temporary practice window with a sample phrase; recording starts only when you choose **Start practice** or use the shortcut. For another app, focus its text field before using the shortcut.
 
 Open Settings with **Command-comma** and help from the toolbar or Help menu. Closing Home leaves shortcuts and the menu bar available; click Within in the Dock to reopen it. **Quit Within** exits completely and asks before discarding an active session or pending dictation. Practice text lasts until you clear it or quit.
 

@@ -21,14 +21,30 @@ struct MainView: View {
             return model.shortcutAvailable ? "Ready to dictate" : "Choose an available shortcut"
         }
     }
+    private var subtitle: String {
+        switch model.phase {
+        case .preparing: return "Your words will go to the text field you chose."
+        case .recording: return model.mode == .hold ? "Release your shortcut to finish, or Escape to cancel." : "Press your shortcut again to finish, or Escape to cancel."
+        case .transcribing: return "Keep your cursor in place while transcription finishes."
+        case .recovery: return "Your words are still here. Review them before starting again."
+        case .ready:
+            if model.editingShortcut { return "Dictation is paused while the shortcut dialog is open." }
+            if needsSetup { return "A few choices, then a little more room to think." }
+            if !model.selectedInputAvailable { return "Reconnect your microphone, or choose an input below." }
+            if model.modelBusy || model.workerBusy { return "Your microphone stays off while local speech gets ready." }
+            if !model.modelVerified { return "Review your local model before you dictate." }
+            if !model.shortcutAvailable { return "You can still use the Start button in Practice." }
+            return "Choose a text field in another app, then use your shortcut."
+        }
+    }
     var body: some View {
         VStack(spacing: 0) {
             ScrollView {
                 VStack(alignment: .leading, spacing: 24) {
-                    Brand().padding(.bottom, 6)
+                    Brand(compact: true)
                     VStack(alignment: .leading, spacing: 9) {
                         Text(title).font(.system(size: 26, weight: .semibold)).tracking(-0.5)
-                        Text(model.editingShortcut ? "Dictation is paused while the shortcut dialog is open." : needsSetup ? "A few choices, then a little more room to think." : "Choose a text field in another app. Your words will follow.")
+                        Text(subtitle)
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
                     SessionStatusView(model: model)
@@ -48,29 +64,12 @@ struct MainView: View {
                             Button("Continue setup") { model.showSetup?() }.primaryAction()
                         }.withinSurface()
                     } else {
-                        VStack(spacing: 0) {
-                            HStack(alignment: .center, spacing: 15) {
-                                VStack(alignment: .leading, spacing: 5) {
-                                    Text(model.mode == .hold ? "Hold to talk" : "Press to start / stop").font(.system(size: 13, weight: .semibold))
-                                    Text(model.mode == .hold ? "Release the keys to finish." : "Press again when you’re done.")
-                                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
-                                }
-                                Spacer()
-                                Text(model.shortcutLabel).font(.system(size: 15, weight: .medium, design: .monospaced))
-                                    .padding(.horizontal, 12).padding(.vertical, 9).background(Palette.tint, in: RoundedRectangle(cornerRadius: 8))
-                                    .accessibilityLabel("Shortcut: \(model.dictationShortcut.accessibilityName)")
-                            }
-                            Divider().padding(.vertical, 17)
-                            HStack(spacing: 12) {
-                                Image(systemName: "mic").foregroundStyle(Palette.secondary).accessibilityHidden(true)
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(model.selectedInputName).font(.system(size: 13, weight: .medium))
-                                    Text(model.selectedInputAvailable ? "Selected microphone" : "Reconnect it or choose another in Settings.")
-                                        .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-                                }
-                                Spacer()
-                                Button("Change…") { model.showAudioSettings?() }
-                            }
+                        VStack(alignment: .leading, spacing: 14) {
+                            ShortcutControl(model: model)
+                            Text(model.mode == .hold ? "Hold to talk. Release to finish." : "Press once to start. Press again to finish.")
+                                .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                            Divider()
+                            MicrophoneControls(model: model)
                         }.withinSurface()
                         if !model.accessibilityAllowed {
                             PermissionRow(title: "Accessibility", detail: "Allow insertion into other apps. Practice and Copy are available without it.", allowed: false, action: model.requestAccessibility)
@@ -80,7 +79,7 @@ struct MainView: View {
                                 .font(.system(size: 12)).foregroundStyle(Palette.warning)
                         }
                         HStack {
-                            Button("Try dictation") { model.showPractice?() }.primaryAction().disabled(!model.canStart)
+                            Button("Open Practice") { model.showPractice?() }.primaryAction().disabled(!model.canStart)
                             Spacer()
                             Text("English · up to 5 minutes").font(.system(size: 11)).foregroundStyle(Palette.secondary)
                         }
@@ -116,7 +115,7 @@ struct SetupView: View {
     @ObservedObject var model: AppModel
     var done: () -> Void = {}
     @State var step = 0
-    private let steps = ["Welcome", "Microphone", "Local speech", "Try it"]
+    private let steps = ["Welcome", "Microphone", "Local speech", "Shortcut"]
     private var canContinue: Bool {
         if step == 1 { return model.microphoneAllowed && model.selectedInputAvailable }
         if step == 2 { return model.modelVerified && !model.modelBusy }
@@ -155,10 +154,10 @@ struct SetupView: View {
                         PermissionRow(title: "Type into other apps", detail: "Accessibility places words at your cursor and enables modifier-only shortcuts. You can practice with the Start button without it.", allowed: model.accessibilityAllowed, action: model.requestAccessibility)
                             .withinSurface()
                     } else if step == 2 {
-                        heading("Keep transcription local.", detail: "Download the speech model once. Your recordings and transcripts aren’t sent to a transcription service.")
+                        heading(model.modelVerified ? "Local speech is ready." : "Keep transcription local.", detail: model.modelVerified ? "Your speech model is installed. You can dictate without an internet connection." : "Download the speech model once. Your recordings and transcripts aren’t sent to a transcription service.")
                         ModelPanel(model: model, allowRemoval: !model.modelVerified).withinSurface()
                     } else {
-                        heading("Ready for a few words?", detail: "Choose how you start and stop. Practice gives you a place to try it before dictating into another app.")
+                        heading("Make the shortcut yours.", detail: "Choose a key and how it behaves. Then try a few words in Practice.")
                         ActivationControls(model: model).withinSurface()
                         MicrophoneControls(model: model).withinSurface()
                         if !model.microphoneAllowed {
@@ -220,15 +219,26 @@ struct PracticeView: View {
     var done: () -> Void = {}
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("A few words to try.").font(.system(size: 25, weight: .semibold)).tracking(-0.4)
-            Text("Start here, or use \(model.shortcutLabel) while this window is active. Your practice stays here until you clear it or quit.")
+            Text("Try your first words.").font(.system(size: 25, weight: .semibold)).tracking(-0.4)
+            Text(model.mode == .hold ? "In this window, hold \(model.shortcutLabel), speak, then release. Or choose Start practice below." : "In this window, press \(model.shortcutLabel) to start and again to finish. Or choose Start practice below.")
                 .font(.system(size: 13)).foregroundStyle(Palette.secondary)
             MicrophoneControls(model: model)
             SessionStatusView(model: model)
-            TextEditor(text: $model.practiceText).font(.system(size: 16)).scrollContentBackground(.hidden)
-                .padding(12).frame(minHeight: 140).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
+            ZStack(alignment: .topLeading) {
+                if model.practiceText.isEmpty {
+                    VStack(alignment: .leading, spacing: 9) {
+                        Text("Try saying").font(.system(size: 11, weight: .medium))
+                        Text("“A little more room to think.”").font(.system(size: 18))
+                        Text("Your words will appear here when you finish.").font(.system(size: 12))
+                    }.foregroundStyle(Palette.secondary).padding(.horizontal, 18).padding(.vertical, 20)
+                        .allowsHitTesting(false).accessibilityHidden(true)
+                }
+                TextEditor(text: $model.practiceText).font(.system(size: 16)).scrollContentBackground(.hidden)
+                    .padding(12)
+                    .accessibilityLabel("Practice text")
+                    .accessibilityHint(model.practiceText.isEmpty ? "Try saying: A little more room to think. Your words appear here after you finish. Kept until you clear them or quit." : "Kept until you clear these words or quit.")
+            }.frame(minHeight: 140).background(Palette.surface, in: RoundedRectangle(cornerRadius: 12))
                 .overlay(RoundedRectangle(cornerRadius: 12).stroke(Palette.line))
-                .accessibilityLabel("Practice text, kept only until you quit")
             HStack {
                 if model.isActive && model.isPracticeSession {
                     Button("Stop and transcribe", action: model.stop).primaryAction()
@@ -240,7 +250,7 @@ struct PracticeView: View {
                 Button("Clear") { model.practiceText = "" }.disabled(model.practiceText.isEmpty || model.workerBusy)
                 Button("Done", action: done).disabled(model.hasActivePracticeSession)
             }
-            Text("English · up to 5 minutes · no history saved").font(.system(size: 11)).foregroundStyle(Palette.secondary)
+            Text("Practice stays here until you clear it or quit. No history is saved.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }.padding(28).frame(minWidth: 540, minHeight: 460).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)
     }
 }
