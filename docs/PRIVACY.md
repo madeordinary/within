@@ -39,4 +39,6 @@ Custom shortcuts store only the chosen key and modifiers in preferences. The sho
 
 App-controlled production logging does not serialize audio or transcripts, and the speech dependency's central logging sink is disabled. Separate developer fixture commands can write requested reports from supplied fixture input. Use synthetic fixtures and review any output before sharing it. macOS may create diagnostic or crash reports outside the app's complete control; the app does not upload them.
 
+The diagnostic preview includes the latest session's startup durations, trigger category, and whether it used Practice. These measurements stay in memory unless you explicitly save the report; they contain no audio, text, wall-clock timestamps, or destination/device identities.
+
 To remove the model, use Settings → Remove model. To uninstall, quit and delete Within, optionally remove its application-support folder and preference domain, disable Start at login, and revoke Microphone and Accessibility permissions in System Settings.

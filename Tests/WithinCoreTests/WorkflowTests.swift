@@ -80,7 +80,7 @@ final class WorkflowTests: XCTestCase {
             microphoneSelection: "system_default", modelInstalled: true, modelRevision: "test",
             lastModelCheck: "passed", lastErrorCode: "none", lastRecordingStop: observation)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.preview().utf8)) as? [String: Any])
-        XCTAssertEqual(json["schema"] as? Int, 3)
+        XCTAssertEqual(json["schema"] as? Int, 4)
         XCTAssertEqual(json["telemetry"] as? Bool, false)
         let stop = try XCTUnwrap(json["lastRecordingStop"] as? [String: Any])
         XCTAssertEqual(Set(stop.keys), ["cause", "phase", "hardwareChord", "sessionChord", "eventListeningAllowed", "audioConfiguration"])
@@ -92,6 +92,47 @@ final class WorkflowTests: XCTestCase {
             XCTAssertEqual(Set(chord.keys), ["controlHeld", "shiftHeld", "triggerHeld"])
             XCTAssertTrue(chord.values.allSatisfy { $0 is Bool })
         }
+    }
+    func testStartupTimingsUseOneMonotonicSessionAndFreezeAtFirstAudio() throws {
+        var tracker = RecordingStartupTracker()
+        let start = ContinuousClock.now
+        tracker.mark(.modelReady, at: start)
+        XCTAssertNil(tracker.latest)
+        tracker.begin(trigger: .holdShortcut, practice: false, at: start)
+        tracker.mark(.permissionsReady, at: start.advanced(by: .milliseconds(-1)))
+        XCTAssertTrue(try XCTUnwrap(tracker.latest).milliseconds.isEmpty)
+        tracker.mark(.modelReady, at: start.advanced(by: .milliseconds(300)))
+        tracker.mark(.modelReady, at: start.advanced(by: .milliseconds(800)))
+        tracker.mark(.firstAudioObserved, at: start.advanced(by: .milliseconds(2400)))
+        tracker.mark(.audioEngineStarted, at: start.advanced(by: .milliseconds(2500)))
+        XCTAssertEqual(tracker.latest?.milliseconds, ["modelReady": 300, "firstAudioObserved": 2400])
+        tracker.begin(trigger: .tapShortcut, practice: true, at: start)
+        XCTAssertTrue(try XCTUnwrap(tracker.latest).milliseconds.isEmpty)
+        tracker.mark(.modelReady, at: start.advanced(by: .milliseconds(275)))
+        tracker.finish() // Canceled preparation must not acquire later milestones.
+        tracker.mark(.firstAudioObserved, at: start.advanced(by: .seconds(2)))
+        XCTAssertEqual(tracker.latest?.milliseconds, ["modelReady": 275])
+    }
+    func testStartupExportContainsOnlyClosedTimingsAndNoClockOrIdentity() throws {
+        var tracker = RecordingStartupTracker()
+        let start = ContinuousClock.now
+        tracker.begin(trigger: .control, practice: true, at: start)
+        for (index, stage) in RecordingStartupStage.allCases.enumerated() {
+            tracker.mark(stage, at: start.advanced(by: .milliseconds(100 * (index + 1))))
+        }
+        let report = DiagnosticsReport(appVersion: "test", macOSVersion: "test", architecture: "arm64",
+            microphonePermission: "allowed", accessibilityPermission: true, shortcutRegistered: true,
+            microphoneSelection: "selected_device_identity_omitted", modelInstalled: true, modelRevision: "test",
+            lastModelCheck: "passed", lastErrorCode: "none", appBuild: "6", lastRecordingStartup: tracker.latest)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.preview().utf8)) as? [String: Any])
+        XCTAssertEqual(json["appBuild"] as? String, "6")
+        let startup = try XCTUnwrap(json["lastRecordingStartup"] as? [String: Any])
+        XCTAssertEqual(Set(startup.keys), ["trigger", "practice", "milliseconds"])
+        XCTAssertEqual(startup["trigger"] as? String, "control")
+        XCTAssertEqual(startup["practice"] as? Bool, true)
+        let timings = try XCTUnwrap(startup["milliseconds"] as? [String: Int])
+        XCTAssertEqual(Set(timings.keys), Set(RecordingStartupStage.allCases.map(\.rawValue)))
+        XCTAssertTrue(timings.values.allSatisfy { $0 >= 0 })
     }
     func testUnchangedRunningInputSurvivesConfigurationNotification() {
         let unchanged = AudioConfigurationObservation(engineRunning: true, deviceUnchanged: true,

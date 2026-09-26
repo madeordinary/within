@@ -75,11 +75,49 @@ public struct RecordingStopTracker {
     }
 }
 
+public enum RecordingStartupTrigger: String, Encodable {
+    case control, holdShortcut = "hold_shortcut", tapShortcut = "tap_shortcut"
+}
+
+public enum RecordingStartupStage: String, CaseIterable {
+    case permissionsReady, targetCaptured, feedbackPresented, modelReady, speechReady, targetRechecked
+    case audioEngineCreated, audioInputReady, audioDeviceSelected, audioTapInstalled, audioEnginePrepared, audioEngineStarted
+    case recordingPublished, firstAudioObserved
+}
+
+/// Cumulative milliseconds from an accepted start action, not wall-clock times.
+/// Shortcut recognition (including the hold guard) happens before this clock.
+public struct RecordingStartupDiagnostic: Encodable {
+    public let trigger: RecordingStartupTrigger
+    public let practice: Bool
+    public fileprivate(set) var milliseconds: [String: Int] = [:]
+}
+
+public struct RecordingStartupTracker {
+    private var started: ContinuousClock.Instant?
+    public private(set) var latest: RecordingStartupDiagnostic?
+    public init() {}
+    public mutating func begin(trigger: RecordingStartupTrigger, practice: Bool, at time: ContinuousClock.Instant = .now) {
+        started = time
+        latest = RecordingStartupDiagnostic(trigger: trigger, practice: practice)
+    }
+    public mutating func mark(_ stage: RecordingStartupStage, at time: ContinuousClock.Instant = .now) {
+        guard let started, time >= started, latest?.milliseconds[stage.rawValue] == nil else { return }
+        let elapsed = started.duration(to: time).components
+        let milliseconds = Double(elapsed.seconds) * 1_000 + Double(elapsed.attoseconds) / 1e15
+        guard milliseconds.isFinite, milliseconds < Double(Int.max) else { return }
+        latest?.milliseconds[stage.rawValue] = Int(milliseconds.rounded())
+        if stage == .firstAudioObserved { finish() }
+    }
+    public mutating func finish() { started = nil }
+}
+
 /// Closed schema: callers supply categories, never exception descriptions,
 /// device names, paths, destination identities, audio, or transcript text.
 public struct DiagnosticsReport: Encodable {
-    public let schema = 3
+    public let schema = 4
     public let appVersion: String
+    public let appBuild: String
     public let macOSVersion: String
     public let architecture: String
     public let microphonePermission: String
@@ -92,19 +130,23 @@ public struct DiagnosticsReport: Encodable {
     public let lastModelCheck: String
     public let lastErrorCode: String
     public let lastRecordingStop: RecordingStopDiagnostic?
+    public let lastRecordingStartup: RecordingStartupDiagnostic?
     public let automaticUpdateChecks = false
     public let telemetry = false
 
     public init(appVersion: String, macOSVersion: String, architecture: String, microphonePermission: String,
                 accessibilityPermission: Bool, shortcutRegistered: Bool, microphoneSelection: String,
                 modelInstalled: Bool, modelRevision: String, lastModelCheck: String, lastErrorCode: String,
-                lastRecordingStop: RecordingStopDiagnostic? = nil) {
+                lastRecordingStop: RecordingStopDiagnostic? = nil,
+                appBuild: String = "development", lastRecordingStartup: RecordingStartupDiagnostic? = nil) {
         self.appVersion = appVersion; self.macOSVersion = macOSVersion; self.architecture = architecture
+        self.appBuild = appBuild
         self.microphonePermission = microphonePermission; self.accessibilityPermission = accessibilityPermission
         self.shortcutRegistered = shortcutRegistered; self.microphoneSelection = microphoneSelection
         self.modelInstalled = modelInstalled; self.modelRevision = modelRevision
         self.lastModelCheck = lastModelCheck; self.lastErrorCode = lastErrorCode
         self.lastRecordingStop = lastRecordingStop
+        self.lastRecordingStartup = lastRecordingStartup
     }
     public func preview() -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

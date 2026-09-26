@@ -32,6 +32,7 @@ final class AppModel: ObservableObject {
     private var lastModelCheck = "not_checked"
     private let readinessWaitMessage = "Local speech is busy. Try again when it’s ready."
     private var stopDiagnostics = RecordingStopTracker()
+    private var startupDiagnostics = RecordingStartupTracker()
     @Published var practiceText = ""
     @Published private(set) var isPracticeSession = false
     @Published var compatibilityPaste: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
@@ -274,6 +275,7 @@ final class AppModel: ObservableObject {
     }
     func start(practice: Bool, fromShortcut: Bool = false) {
         guard !editingShortcut else { return }
+        let requestedAt = ContinuousClock.now
         refreshPermissions(mayRegisterShortcut: !fromShortcut)
         guard canStart else {
             if phase == .recovery { showRecovery?() }
@@ -284,6 +286,9 @@ final class AppModel: ObservableObject {
             else if !modelVerified { message = "Check the local speech model in Settings."; showModelSettings?() }
             return
         }
+        startupDiagnostics.begin(trigger: fromShortcut ? (mode == .hold ? .holdShortcut : .tapShortcut) : .control,
+            practice: practice, at: requestedAt)
+        startupDiagnostics.mark(.permissionsReady)
         target?.stopObserving(); target = nil; initialBlock = nil; forcedRecovery = nil
         pasteChosenForSession = false
         fromHoldShortcut = fromShortcut && mode == .hold
@@ -298,6 +303,7 @@ final class AppModel: ObservableObject {
                 initialBlock = error.reason
             }
         }
+        startupDiagnostics.mark(.targetCaptured)
         guard let id = session.begin() else { return }
         isPracticeSession = practice
         stopDiagnostics.begin()
@@ -305,6 +311,7 @@ final class AppModel: ObservableObject {
         trial.discard(); workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
         notify()
         resumeEscapeShortcut()
+        startupDiagnostics.mark(.feedbackPresented)
         worker = Task { [weak self] in
             guard let self else { return }
             do {
@@ -313,15 +320,19 @@ final class AppModel: ObservableObject {
                 lastModelCheck = "passed"
                 try Task.checkCancellation()
                 guard session.isCurrent(id) else { throw CancellationError() }
+                startupDiagnostics.mark(.modelReady)
                 try await speech.begin()
                 try Task.checkCancellation()
                 guard session.isCurrent(id) else { throw CancellationError() }
+                startupDiagnostics.mark(.speechReady)
                 guard !IsSecureEventInputEnabled() else { throw CaptureFailure.protectedInput }
                 if let target, target.evidence(forCompatibilityPaste: pasteChosenForSession).blockReason != nil { throw CaptureFailure.targetChanged }
-                let ring = try capture.start(deviceUID: microphoneUID)
+                startupDiagnostics.mark(.targetRechecked)
+                let ring = try capture.start(deviceUID: microphoneUID) { self.startupDiagnostics.mark($0) }
                 let rate = capture.sampleRate
                 guard session.recording(id) else { capture.stop(); throw CancellationError() }
                 message = "Starting microphone…"; notify()
+                startupDiagnostics.mark(.recordingPublished)
                 startPulse(ring: ring, sampleRate: rate, id: id)
                 let text = try await speech.consume(ring, sampleRate: rate)
                 try Task.checkCancellation()
@@ -387,7 +398,10 @@ final class AppModel: ObservableObject {
                 if audioFlowing, ContinuousClock.now >= lastAudioProgress.advanced(by: .seconds(5)) {
                     forcedRecovery = "The microphone stopped sending audio. Review the words captured before it stopped."; stop(cause: .audioStalled); return
                 }
-                if !audioFlowing, ring.samplesCaptured > 0 { audioFlowing = true; message = "Listening"; announce("Recording started"); playCue(start: true) }
+                if !audioFlowing, ring.samplesCaptured > 0 {
+                    startupDiagnostics.mark(.firstAudioObserved)
+                    audioFlowing = true; message = "Listening"; announce("Recording started"); playCue(start: true)
+                }
                 if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) { cancel(reason: "No audio arrived from the microphone. Check the selected input and try again.", cause: .noAudio); return }
                 if fromHoldShortcut {
                     let chord = shortcut.chordState(dictationShortcut)
@@ -425,6 +439,7 @@ final class AppModel: ObservableObject {
     }
     private func recordStop(_ cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
         guard isActive || phase == .transcribing, stopDiagnostics.lastStop == nil else { return }
+        startupDiagnostics.finish()
         stopDiagnostics.record(RecordingStopDiagnostic(cause: cause, phase: phase,
             hardwareChord: hardwareChord ?? shortcut.chordState(dictationShortcut),
             sessionChord: shortcut.chordState(dictationShortcut, source: .combinedSessionState),
@@ -578,7 +593,9 @@ final class AppModel: ObservableObject {
             microphonePermission: permission, accessibilityPermission: accessibilityAllowed, shortcutRegistered: shortcutAvailable,
             microphoneSelection: microphoneUID.isEmpty ? "system_default" : "selected_device_identity_omitted",
             modelInstalled: modelInstalled, modelRevision: manifest.revision, lastModelCheck: lastModelCheck,
-            lastErrorCode: lastErrorCode, lastRecordingStop: stopDiagnostics.lastStop).preview()
+            lastErrorCode: lastErrorCode, lastRecordingStop: stopDiagnostics.lastStop,
+            appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development",
+            lastRecordingStartup: startupDiagnostics.latest).preview()
     }
     func configurePreview(_ state: String) {
         guard previewMode else { return }

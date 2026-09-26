@@ -21,13 +21,15 @@ final class CaptureEngine {
 
     func resetDiagnostics() { lastConfigurationChange = nil }
 
-    func start(deviceUID: String) throws -> AudioRing {
+    func start(deviceUID: String, didReach: (RecordingStartupStage) -> Void = { _ in }) throws -> AudioRing {
         guard engine == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CaptureFailure.permission }
         let engine = AVAudioEngine()
         self.engine = engine
+        didReach(.audioEngineCreated)
         do {
             let input = engine.inputNode
             guard let unit = input.audioUnit else { throw CaptureFailure.device }
+            didReach(.audioInputReady)
             if !deviceUID.isEmpty {
                 guard let selected = Self.devices().first(where: { $0.id == deviceUID }) else { throw CaptureFailure.device }
                 // Reapplying the current device is unnecessary and may reconfigure the I/O unit.
@@ -38,6 +40,7 @@ final class CaptureEngine {
                 guard Self.currentDevice(unit) == selected.objectID else { throw CaptureFailure.device }
             }
             guard let initialDevice = Self.currentDevice(unit), Self.deviceIsAvailable(initialDevice) else { throw CaptureFailure.device }
+            didReach(.audioDeviceSelected)
             let inputFormat = input.inputFormat(forBus: 0)
             let format = input.outputFormat(forBus: 0)
             guard format.channelCount > 0, format.sampleRate >= 8000, format.sampleRate <= 192000,
@@ -51,8 +54,11 @@ final class CaptureEngine {
                 if let channel = buffer.floatChannelData?[0] { _ = ring.push(channel, count: Int(buffer.frameLength)) }
             }
             tapInstalled = true
+            didReach(.audioTapInstalled)
             engine.prepare()
+            didReach(.audioEnginePrepared)
             try engine.start()
+            didReach(.audioEngineStarted)
             configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self, weak engine] _ in
                 // Return from AVFAudio's notification before querying or tearing down its engine.
                 Task { @MainActor [weak self, weak engine] in
