@@ -10,6 +10,8 @@ Microphone permission is requested from the Allow button. Permission and model p
 
 The app does not write audio or transcripts to disk. Audio passes through a bounded ring and rolling inference windows. Consumed ring storage is overwritten. Frameworks and macOS can retain copies; this is not a guarantee of memory erasure or protection against a compromised operating system.
 
+After recording, the app may retain the stopped audio-engine object for the same selected microphone. It stops the audio hardware and removes the tap. Buffered audio can finish transcription before it is released; the stopped engine retains no recording buffer and does not keep the microphone running between sessions.
+
 Pending words remain in memory for insertion or recovery. Practice text remains in its visible field until Clear or app exit. Lock/sleep cancels active capture; already-recovered words remain pending and their window is hidden. There is no transcript-history database. Model state may remain loaded until memory pressure, lock/sleep, removal, or quit.
 
 ## Insertion and clipboard

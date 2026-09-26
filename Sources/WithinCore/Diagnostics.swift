@@ -126,7 +126,7 @@ public struct DiagnosticsReport: Encodable {
     public let microphoneSelection: String
     public let modelInstalled: Bool
     public let modelRevision: String
-    public let modelVerificationPolicy = "Full pinned SHA-256 before every session"
+    public let modelVerificationPolicy = "Full pinned SHA-256 at load, on metadata changes, and every 5 minutes while idle; metadata checked each session; expired checks run before capture"
     public let lastModelCheck: String
     public let lastErrorCode: String
     public let lastRecordingStop: RecordingStopDiagnostic?

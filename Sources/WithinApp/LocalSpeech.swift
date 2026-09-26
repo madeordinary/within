@@ -7,21 +7,63 @@ actor LocalSpeech {
     private var models: AsrModels?
     private var loadedDirectory: URL?
     private var stream: SlidingWindowAsrManager?
+    private var verification = ModelVerificationCache()
+    private var loadedManifest: ModelManifest?
+    private var verificationTask: Task<Void, Never>?
+    private var startingSession = false
+    private var integrityFailureHandler: (@Sendable () async -> Void)?
 
     init() { ModelHub.offlineMode = true }
 
+    func setIntegrityFailureHandler(_ handler: @escaping @Sendable () async -> Void) {
+        integrityFailureHandler = handler
+    }
+
     func prepare(directory: URL, manifest: ModelManifest) async throws {
-        try ModelIntegrity.verify(manifest, at: directory)
-        if models != nil, loadedDirectory == directory { return }
-        try Task.checkCancellation()
-        models = try AsrModels.loadLocal(from: directory, version: .v3, encoderPrecision: .int8V2)
-        loadedDirectory = directory
-        try Task.checkCancellation()
+        guard stream == nil, !startingSession else { throw SpeechFailure.busy }
+        do {
+            try verification.verify(manifest, at: directory, force: models == nil)
+            if models == nil || loadedDirectory != directory || loadedManifest != manifest {
+                try Task.checkCancellation()
+                models = try AsrModels.loadLocal(from: directory, version: .v3, encoderPrecision: .int8V2)
+                loadedDirectory = directory; loadedManifest = manifest
+            }
+            try Task.checkCancellation()
+            scheduleVerification()
+        } catch {
+            verification.invalidate(); models = nil; loadedDirectory = nil; loadedManifest = nil
+            verificationTask?.cancel(); verificationTask = nil
+            throw error
+        }
+    }
+
+    private func scheduleVerification() {
+        guard verificationTask == nil else { return }
+        verificationTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: ModelVerificationCache.maximumAge) } catch { return }
+                guard let self else { return }
+                await self.reverifyIfIdle()
+            }
+        }
+    }
+    private func reverifyIfIdle() async {
+        guard stream == nil, !startingSession, models != nil,
+              let directory = loadedDirectory, let manifest = loadedManifest else { return }
+        do { try verification.verify(manifest, at: directory, force: true) }
+        catch {
+            guard !Task.isCancelled else { return }
+            verification.invalidate(); models = nil; loadedDirectory = nil; loadedManifest = nil
+            verificationTask?.cancel(); verificationTask = nil
+            await integrityFailureHandler?()
+        }
     }
 
     func begin() async throws {
         guard let models else { throw SpeechFailure.notReady }
-        guard stream == nil else { throw SpeechFailure.busy }
+        guard stream == nil, !startingSession else { throw SpeechFailure.busy }
+        startingSession = true
+        defer { startingSession = false }
         let next = SlidingWindowAsrManager(config: .default)
         try await next.loadModels(models)
         try await next.withinBegin()
@@ -69,6 +111,8 @@ actor LocalSpeech {
         stream = nil
     }
     func unload() async {
+        verificationTask?.cancel(); verificationTask = nil
+        verification.invalidate(); loadedManifest = nil
         await cancel()
         models = nil; loadedDirectory = nil
     }

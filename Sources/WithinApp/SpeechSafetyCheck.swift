@@ -8,7 +8,21 @@ func speechSafetyCheck() async {
         URLProtocol.registerClass(OfflineProbe.self)
         defer { URLProtocol.unregisterClass(OfflineProbe.self) }
         let speech = LocalSpeech()
-        try await speech.prepare(directory: URL(fileURLWithPath: CommandLine.arguments[2]), manifest: loadManifest())
+        let directory = URL(fileURLWithPath: CommandLine.arguments[2])
+        let manifest = try loadManifest()
+        func seconds(since start: ContinuousClock.Instant) -> Double {
+            let duration = start.duration(to: .now).components
+            return Double(duration.seconds) + Double(duration.attoseconds) / 1e18
+        }
+        let coldStart = ContinuousClock.now
+        try await speech.prepare(directory: directory, manifest: manifest)
+        let coldPrepareSeconds = seconds(since: coldStart)
+        var warmPrepareSeconds: [Double] = []
+        for _ in 0..<5 {
+            let start = ContinuousClock.now
+            try await speech.prepare(directory: directory, manifest: manifest)
+            warmPrepareSeconds.append(seconds(since: start))
+        }
         try await speech.begin()
         let canceledRing = AudioRing(capacity: 320000, sampleLimit: 4800000)
         let values = [Float](repeating: 0.01, count: 256000)
@@ -51,6 +65,7 @@ func speechSafetyCheck() async {
             && fixtureReports.allSatisfy { $0["expectedTailPresent"] as? Bool == true && $0["seamArtifactAbsent"] as? Bool == true }
         let report: [String: Any] = ["fixtureOnly": true, "cancelReturnedNoText": cancellationRefusedOutput,
             "subsequentSessionSucceeded": true, "silenceProducedNoText": silence.isEmpty,
+            "coldPrepareSeconds": coldPrepareSeconds, "warmPrepareSeconds": warmPrepareSeconds,
             "interceptedNetworkRequests": OfflineProbe.requestCount, "publicFixtures": fixtureReports, "allPassed": allPassed,
             "limitations": "Three public upstream regression clips and synthetic cancellation/silence inputs, not a general accuracy benchmark or live microphone test."]
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))

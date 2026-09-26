@@ -12,6 +12,11 @@ struct MicrophoneDevice: Identifiable, Equatable {
 @MainActor
 final class CaptureEngine {
     private var engine: AVAudioEngine?
+    private var stoppedEngine: AVAudioEngine?
+    private var stoppedDeviceUID: String?
+    private var activeDeviceUID = ""
+    private var captureID: UUID?
+    private var mayReuseEngine = false
     private var tapInstalled = false
     private var configurationObserver: NSObjectProtocol?
     var onConfigurationChanged: (() -> Void)?
@@ -23,8 +28,15 @@ final class CaptureEngine {
 
     func start(deviceUID: String, didReach: (RecordingStartupStage) -> Void = { _ in }) throws -> AudioRing {
         guard engine == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CaptureFailure.permission }
-        let engine = AVAudioEngine()
+        // Retain only an already-stopped object for the exact explicitly selected input.
+        // The system-default route is rebuilt so an idle default-device change is honored.
+        let engine: AVAudioEngine
+        if !deviceUID.isEmpty, stoppedDeviceUID == deviceUID, let stoppedEngine, !stoppedEngine.isRunning {
+            engine = stoppedEngine
+        } else { engine = AVAudioEngine() }
+        preventReuse()
         self.engine = engine
+        let id = UUID(); captureID = id; activeDeviceUID = deviceUID
         didReach(.audioEngineCreated)
         do {
             let input = engine.inputNode
@@ -58,11 +70,12 @@ final class CaptureEngine {
             engine.prepare()
             didReach(.audioEnginePrepared)
             try engine.start()
+            mayReuseEngine = true
             didReach(.audioEngineStarted)
             configurationObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self, weak engine] _ in
                 // Return from AVFAudio's notification before querying or tearing down its engine.
                 Task { @MainActor [weak self, weak engine] in
-                    guard let self, let engine, self.engine === engine else { return }
+                    guard let self, let engine, self.engine === engine, self.captureID == id else { return }
                     let input = engine.inputNode
                     let device = input.audioUnit.flatMap { Self.currentDevice($0) }
                     let observation = AudioConfigurationObservation(
@@ -74,11 +87,11 @@ final class CaptureEngine {
                     self.lastConfigurationChange = observation
                     // A queued notification alone does not establish that the active input changed.
                     // Never restart a stopped engine or switch devices within an active dictation.
-                    if observation.requiresStop { self.onConfigurationChanged?() }
+                    if observation.requiresStop { self.preventReuse(); self.onConfigurationChanged?() }
                 }
             }
             return ring
-        } catch { stop(); throw error }
+        } catch { stop(reusingStoppedEngine: false); throw error }
     }
 
     private static func currentDevice(_ unit: AudioUnit) -> AudioDeviceID? {
@@ -97,13 +110,24 @@ final class CaptureEngine {
         return AudioObjectGetPropertyData(device, &address, 0, nil, &size, &alive) == noErr && alive != 0
     }
 
-    func stop() {
+    func preventReuse() {
+        stoppedEngine = nil; stoppedDeviceUID = nil; mayReuseEngine = false
+    }
+
+    func stop(reusingStoppedEngine: Bool = true) {
+        captureID = nil
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver); self.configurationObserver = nil }
         engine?.stop()
         if tapInstalled { engine?.inputNode.removeTap(onBus: 0); tapInstalled = false }
         ring?.close()
+        if let engine {
+            if reusingStoppedEngine, mayReuseEngine, !engine.isRunning, !activeDeviceUID.isEmpty {
+                stoppedEngine = engine; stoppedDeviceUID = activeDeviceUID
+            } else { preventReuse() }
+        } else if !reusingStoppedEngine { preventReuse() }
         engine = nil
         ring = nil
+        activeDeviceUID = ""; mayReuseEngine = false
     }
 
     static func devices() -> [MicrophoneDevice] {

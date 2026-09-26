@@ -41,4 +41,60 @@ final class IntegrityTests: XCTestCase {
         try FileManager.default.removeItem(at: root.appendingPathComponent("model/data.bin"))
         XCTAssertThrowsError(try ModelIntegrity.verify(manifest(), at: root))
     }
+    func testResidentVerificationExpiresAndExplicitInvalidationRehashes() throws {
+        let root = try fixture(); let manifest = try manifest(); let now = ContinuousClock.now
+        var cache = ModelVerificationCache()
+        XCTAssertTrue(try cache.verify(manifest, at: root, now: now))
+        XCTAssertFalse(try cache.verify(manifest, at: root, now: now.advanced(by: .seconds(299))))
+        XCTAssertTrue(try cache.verify(manifest, at: root, now: now.advanced(by: .seconds(300))))
+        XCTAssertTrue(try cache.verify(manifest, at: root, force: true, now: now.advanced(by: .seconds(301))))
+        cache.invalidate()
+        XCTAssertTrue(try cache.verify(manifest, at: root, now: now.advanced(by: .seconds(302))))
+    }
+    func testSameSizeMutationWithRestoredModificationDateIsRejectedAndClearsProof() throws {
+        let root = try fixture(); let manifest = try manifest()
+        let file = root.appendingPathComponent("model/data.bin")
+        let originalDate = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: file.path)[.modificationDate] as? Date)
+        var cache = ModelVerificationCache()
+        try cache.verify(manifest, at: root)
+        try Data("changed model".utf8).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: originalDate], ofItemAtPath: file.path)
+        XCTAssertThrowsError(try cache.verify(manifest, at: root)) { XCTAssertEqual($0 as? IntegrityError, .wrongHash) }
+        try Data("trusted model".utf8).write(to: file)
+        XCTAssertTrue(try cache.verify(manifest, at: root))
+        XCTAssertFalse(try cache.verify(manifest, at: root))
+    }
+    func testCachedVerificationRejectsAddedMissingAndSymbolicFiles() throws {
+        for change in 0..<3 {
+            let root = try fixture(); let manifest = try manifest()
+            var cache = ModelVerificationCache()
+            try cache.verify(manifest, at: root)
+            switch change {
+            case 0: try Data("extra".utf8).write(to: root.appendingPathComponent("extra"))
+            case 1: try FileManager.default.removeItem(at: root.appendingPathComponent("model/data.bin"))
+            default: try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("link"), withDestinationURL: root.appendingPathComponent("model"))
+            }
+            XCTAssertThrowsError(try cache.verify(manifest, at: root))
+        }
+    }
+    func testVerificationProofIsBoundToManifestDirectoryAndFileIdentity() throws {
+        let root = try fixture(); let otherRoot = try fixture(); let manifest = try manifest()
+        var cache = ModelVerificationCache()
+        try cache.verify(manifest, at: root)
+        XCTAssertTrue(try cache.verify(manifest, at: otherRoot))
+        let otherManifest = try self.manifest(data: Data("changed model".utf8))
+        XCTAssertThrowsError(try cache.verify(otherManifest, at: otherRoot))
+        try cache.verify(manifest, at: root)
+        // Atomic replacement changes the file identity even if trusted bytes match.
+        try Data("trusted model".utf8).write(to: root.appendingPathComponent("model/data.bin"), options: .atomic)
+        XCTAssertTrue(try cache.verify(manifest, at: root))
+    }
+    func testRootSymlinkCannotReuseVerifiedTarget() throws {
+        let root = try fixture(); let manifest = try manifest()
+        var cache = ModelVerificationCache(); try cache.verify(manifest, at: root)
+        let alias = root.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: root)
+        defer { try? FileManager.default.removeItem(at: alias) }
+        XCTAssertThrowsError(try cache.verify(manifest, at: alias)) { XCTAssertEqual($0 as? IntegrityError, .unsafePath) }
+    }
 }

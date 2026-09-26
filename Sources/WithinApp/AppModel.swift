@@ -40,7 +40,11 @@ final class AppModel: ObservableObject {
     @Published private(set) var dictationShortcut: DictationShortcut
     @Published private(set) var editingShortcut = false
     @Published private(set) var shortcutMessage = ""
-    @Published var microphoneUID: String { didSet { guard !previewMode else { return }; UserDefaults.standard.set(microphoneUID, forKey: "microphoneUID") } }
+    @Published var microphoneUID: String { didSet {
+        guard !previewMode else { return }
+        if microphoneUID != oldValue { capture.preventReuse() }
+        UserDefaults.standard.set(microphoneUID, forKey: "microphoneUID")
+    } }
     @Published private(set) var recoveryReason: RecoveryReason?
     @Published private(set) var recoveryDetail = ""
     @Published private(set) var returning = false
@@ -147,6 +151,7 @@ final class AppModel: ObservableObject {
         installLifecycleObservers()
         modelTask = Task { [weak self] in
             guard let self else { return }
+            await speech.setIntegrityFailureHandler { [weak self] in await self?.invalidateModelVerification() }
             try? await store.cleanInterruptedDownloads()
             modelInstalled = await store.isInstalled()
             modelMessage = modelInstalled ? "Preparing local speech…" : "One local model. No account."
@@ -202,6 +207,7 @@ final class AppModel: ObservableObject {
     private func refreshPermissions(mayRegisterShortcut: Bool) {
         guard !previewMode else { return }
         microphoneAllowed = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        if !microphoneAllowed { capture.preventReuse() }
         let accessibilityChanged = accessibilityAllowed != AXIsProcessTrusted()
         accessibilityAllowed = AXIsProcessTrusted()
         loginEnabled = SMAppService.mainApp.status == .enabled
@@ -257,9 +263,11 @@ final class AppModel: ObservableObject {
         modelVerified = false
         lastModelCheck = "failed"
         modelMessage = "Model files failed verification. Remove the model and download a fresh copy."
+        notify()
     }
     func removeModel() {
         guard !modelBusy, !workerBusy, phase == .ready else { return }
+        capture.preventReuse()
         modelBusy = true
         modelTask = Task { [weak self] in
             guard let self else { return }
@@ -354,7 +362,7 @@ final class AppModel: ObservableObject {
                     session.finish(id); message = "Your words arrived. Try the shortcut in another app."; releaseTarget(); announce("Practice dictation finished")
                 } else { await deliver(text, id: id) }
             } catch {
-                capture.stop(); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+                capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
                 if session.isCurrent(id) { recordStop(.pipelineError) }
                 await speech.cancel()
                 // Model integrity is independent of whether the user canceled this session.
@@ -371,7 +379,7 @@ final class AppModel: ObservableObject {
                     announce(message)
                 }
             }
-            if unloadAfterSession { await speech.unload(); unloadAfterSession = false }
+            if unloadAfterSession { await speech.unload(); capture.preventReuse(); unloadAfterSession = false }
             shortcut.stopEscapeMonitor()
             workerBusy = false; worker = nil; notify()
         }
@@ -431,7 +439,7 @@ final class AppModel: ObservableObject {
     func cancel() { cancel(cause: .cancelButton) }
     func cancel(cause: RecordingStopCause) { cancel(reason: "Canceled. Microphone off.", cause: cause) }
     private func cancel(reason: String, cause: RecordingStopCause) {
-        capture.stop(); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+        capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
         recordStop(cause)
         worker?.cancel(); session.cancel(); trial.discard(); releaseTarget()
         recoveryReason = nil; recoveryDetail = ""; level = 0; message = reason
@@ -541,7 +549,7 @@ final class AppModel: ObservableObject {
     @objc private func screenLocked() { cancelForBoundary() }
     private func cancelForBoundary() {
         // Stop audio before querying diagnostic state or invalidating the session.
-        capture.stop()
+        capture.stop(reusingStoppedEngine: false)
         recordStop(.systemBoundary)
         if session.interruptForSystemBoundary() { cancel() }
         else if phase == .recovery {
@@ -552,6 +560,7 @@ final class AppModel: ObservableObject {
         requestUnload()
     }
     private func requestUnload() {
+        capture.preventReuse()
         if workerBusy { unloadAfterSession = true; return }
         workerBusy = true
         worker = Task {
