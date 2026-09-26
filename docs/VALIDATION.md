@@ -20,6 +20,7 @@ All rows remain pending until relevant observed results are reviewed. Use empty 
 | Area | Required evidence | Status |
 | --- | --- | --- |
 | Permissions and shortcuts | Grant, deny, revoke; hold/toggle/release; missed key-up; secure input; supported OS and keyboard behavior. | Pending |
+| Native app surfaces | Dock/Command-Tab, close/reopen, menus, Settings, setup gating, practice routing, recovery retention, and light/dark layouts on supported systems. | Pending |
 | Capture and lifecycle | Actual microphone indicator; Stop/Cancel; five-minute limit; device changes; lock/sleep; user switching; quit. | Pending |
 | Insertion and recovery | Original-target identity, focus changes, selection/undo, closed controls, uncertain writes, and keyboard recovery in native apps, browsers, and complex editors. | Pending |
 | Optional compatibility paste | Explicit choice, modifier release, clipboard managers/sharing, newer-copy preservation, slow readers, and restoration failure. | Pending |

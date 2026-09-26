@@ -1,6 +1,6 @@
 # Architecture
 
-Within is a native macOS menu-bar executable built with SwiftUI and AppKit. Dictation is its only product module.
+Within is a native macOS app built with SwiftUI and AppKit, with a regular Dock presence and a menu-bar shortcut surface. Dictation is its only product module.
 
 | Component | Responsibility |
 | --- | --- |
@@ -11,6 +11,8 @@ Within is a native macOS menu-bar executable built with SwiftUI and AppKit. Dict
 | `ModelStore` | Explicit download, constrained redirects, bounded staging, per-file size/hash validation, and atomic installation. |
 | `AccessibilityTarget` | Non-content target identities, secure-control refusal, exact target revalidation, and selected-text insertion. |
 | `ShortcutManager` / `AppDelegate` | Explicit shortcut modes, app windows, lifecycle, and single-instance ownership. |
+
+Home, Settings, Setup, Help, Practice, and recovery are separate native windows. Closing Home keeps the process available; reopening from the Dock presents Home. The recording panel cannot become the key or main window. Practice routes a shortcut into its temporary field only while that window is active; opening any window does not start capture. Model installation and successful verification are separate readiness states.
 
 Capture follows an explicit action, verified model preparation, an audio tap, the bounded ring, and a serial inference consumer. The ring bounds queued audio to 20 seconds and a session is capped at five minutes. Overflow stops capture; available text goes to review. Audio is not persisted by the app.
 

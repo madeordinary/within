@@ -9,6 +9,7 @@ import WithinCore
 final class AppModel: ObservableObject {
     @Published private(set) var session = SessionState()
     @Published private(set) var modelInstalled = false
+    @Published private(set) var modelVerified = false
     @Published private(set) var modelBusy = false
     @Published private(set) var modelDownloading = false
     @Published private(set) var downloadProgress: Double = 0
@@ -24,15 +25,16 @@ final class AppModel: ObservableObject {
     @Published private(set) var devices: [MicrophoneDevice] = []
     @Published private(set) var loginEnabled = false
     @Published private(set) var loginMessage = ""
-    @Published var soundsEnabled: Bool { didSet { UserDefaults.standard.set(soundsEnabled, forKey: "soundsEnabled") } }
+    @Published var soundsEnabled: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(soundsEnabled, forKey: "soundsEnabled") } }
     private var lastErrorCode = "none"
     private var lastModelCheck = "not_checked"
     private var stopDiagnostics = RecordingStopTracker()
     @Published var practiceText = ""
-    @Published var compatibilityPaste: Bool { didSet { UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
-    @Published var mode: ActivationMode { didSet { UserDefaults.standard.set(mode.rawValue, forKey: "activationMode") } }
-    @Published var alternateShortcut: Bool { didSet { UserDefaults.standard.set(alternateShortcut, forKey: "alternateShortcut"); registerShortcut() } }
-    @Published var microphoneUID: String { didSet { UserDefaults.standard.set(microphoneUID, forKey: "microphoneUID") } }
+    @Published private(set) var isPracticeSession = false
+    @Published var compatibilityPaste: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
+    @Published var mode: ActivationMode { didSet { guard !previewMode else { return }; UserDefaults.standard.set(mode.rawValue, forKey: "activationMode") } }
+    @Published var alternateShortcut: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(alternateShortcut, forKey: "alternateShortcut"); registerShortcut() } }
+    @Published var microphoneUID: String { didSet { guard !previewMode else { return }; UserDefaults.standard.set(microphoneUID, forKey: "microphoneUID") } }
     @Published private(set) var recoveryReason: RecoveryReason?
     @Published private(set) var recoveryDetail = ""
     @Published private(set) var returning = false
@@ -59,13 +61,24 @@ final class AppModel: ObservableObject {
     private let previewMode: Bool
     var stateChanged: (() -> Void)?
     var showMain: (() -> Void)?
+    var showSettings: (() -> Void)?
+    var showAudioSettings: (() -> Void)?
+    var showHelp: (() -> Void)?
+    var showSetup: (() -> Void)?
+    var showPractice: (() -> Void)?
+    var practiceWindowIsActive: (() -> Bool)?
     var showRecovery: (() -> Void)?
     var dismissRecovery: (() -> Void)?
 
     var phase: DictationPhase { session.phase }
     var pendingText: String { session.transcript ?? "" }
     var shortcutLabel: String { alternateShortcut ? "⌃ ⇧ D" : "⌃ ⇧ Space" }
-    var canStart: Bool { phase == .ready && !workerBusy && modelInstalled && !modelBusy && microphoneAllowed }
+    var canStart: Bool { phase == .ready && !workerBusy && modelInstalled && modelVerified && !modelBusy && microphoneAllowed && selectedInputAvailable }
+    var selectedInputAvailable: Bool { microphoneUID.isEmpty ? !devices.isEmpty : devices.contains { $0.id == microphoneUID } }
+    var selectedInputName: String {
+        if microphoneUID.isEmpty { return devices.isEmpty ? "No microphone available" : "System default" }
+        return devices.first(where: { $0.id == microphoneUID })?.name ?? "Selected microphone unavailable"
+    }
     var targetName: String { target?.appName ?? "original app" }
     var canReturn: Bool { recoveryReason?.permitsReturn == true && target != nil && !returning }
     var isActive: Bool { phase == .preparing || phase == .recording }
@@ -83,7 +96,7 @@ final class AppModel: ObservableObject {
         shortcut.onDown = { [weak self] in
             guard let self else { return }
             switch gesture.down(mode: mode, isActive: isActive) {
-            case .start: start(practice: false, fromShortcut: true)
+            case .start: start(practice: practiceWindowIsActive?() == true, fromShortcut: true)
             case .stop: stop(cause: .togglePress)
             case nil: break
             }
@@ -107,7 +120,7 @@ final class AppModel: ObservableObject {
             modelMessage = modelInstalled ? "Preparing local speech…" : "One local model. No account."
             if modelInstalled {
                 modelBusy = true
-                do { try await speech.prepare(directory: store.directory, manifest: manifest); modelMessage = "Verified and ready · runs offline"; lastModelCheck = "passed" }
+                do { try await speech.prepare(directory: store.directory, manifest: manifest); modelVerified = true; modelMessage = "Verified and ready · runs offline"; lastModelCheck = "passed" }
                 catch { lastModelCheck = "failed_or_unavailable"; modelMessage = "Model unavailable. Remove it and download a fresh copy." }
                 modelBusy = false
             }
@@ -115,7 +128,7 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func registerShortcut() { shortcutAvailable = shortcut.register(alternate: alternateShortcut) }
+    func registerShortcut() { guard !previewMode else { return }; shortcutAvailable = shortcut.register(alternate: alternateShortcut) }
     func refreshPermissions() {
         guard !previewMode else { return }
         microphoneAllowed = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
@@ -155,9 +168,9 @@ final class AppModel: ObservableObject {
                 }
                 modelInstalled = true; modelDownloading = false; modelMessage = "Preparing local speech…"
                 try await speech.prepare(directory: store.directory, manifest: manifest)
-                modelMessage = "Verified and ready · runs offline"; lastModelCheck = "passed"
+                modelVerified = true; modelMessage = "Verified and ready · runs offline"; lastModelCheck = "passed"
             } catch is CancellationError { modelMessage = "Download canceled. Temporary files removed." }
-            catch { modelMessage = Task.isCancelled ? "Download canceled. Temporary files removed." : "Download couldn’t be verified. Check your connection and try again." }
+            catch { modelMessage = Task.isCancelled ? "Download canceled. Temporary files removed." : modelInstalled ? "Model unavailable. Remove it and download a fresh copy." : "Download couldn’t be verified. Check your connection and try again." }
             modelBusy = false; modelDownloading = false; modelTask = nil; notify()
         }
     }
@@ -168,7 +181,7 @@ final class AppModel: ObservableObject {
         modelTask = Task { [weak self] in
             guard let self else { return }
             await speech.unload()
-            do { try await store.remove(); modelInstalled = false; modelMessage = "Model removed from this Mac." }
+            do { try await store.remove(); modelInstalled = false; modelVerified = false; modelMessage = "Model removed from this Mac." }
             catch { modelMessage = "The model couldn’t be removed. Try again after restarting Within." }
             modelBusy = false; modelDownloading = false; modelTask = nil; notify()
         }
@@ -179,6 +192,8 @@ final class AppModel: ObservableObject {
         guard canStart else {
             if phase == .recovery { showRecovery?() }
             else if !modelInstalled || !microphoneAllowed { message = "Finish setup before you dictate."; showMain?() }
+            else if !selectedInputAvailable { message = "Your selected microphone is unavailable. Reconnect it or choose another in Settings."; showMain?() }
+            else if !modelVerified && !modelBusy { message = "Check the local speech model in Settings."; showSettings?() }
             return
         }
         target?.stopObserving(); target = nil; initialBlock = nil; forcedRecovery = nil
@@ -196,6 +211,7 @@ final class AppModel: ObservableObject {
             }
         }
         guard let id = session.begin() else { return }
+        isPracticeSession = practice
         stopDiagnostics.begin()
         capture.resetDiagnostics()
         trial.discard(); workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
@@ -466,8 +482,16 @@ final class AppModel: ObservableObject {
             lastErrorCode: lastErrorCode, lastRecordingStop: stopDiagnostics.lastStop).preview()
     }
     func configurePreview(_ state: String) {
+        guard previewMode else { return }
+        mode = .toggle; alternateShortcut = true; microphoneUID = "preview-input"
+        devices = [MicrophoneDevice(id: "preview-input", objectID: 0, name: "Built-in Microphone")]
         modelInstalled = state != "setup"; microphoneAllowed = state != "setup"; accessibilityAllowed = state != "setup"
+        modelVerified = modelInstalled && state != "model-error"
         modelMessage = "One local model. No account."; shortcutAvailable = true
+        if state == "model-error" { modelMessage = "Model unavailable. Remove it and download a fresh copy." }
+        if state == "missing-input" { devices = [] }
+        if state == "permission" { accessibilityAllowed = false }
+        if state == "practice" { practiceText = "A little more room for an ordinary idea."; isPracticeSession = true }
         if state == "recovery" {
             let id = session.begin()!; _ = session.recover("The best ideas often start as a few ordinary words. Let’s make a little room for them.", id: id)
             recoveryReason = .focusChanged; recoveryDetail = RecoveryReason.focusChanged.explanation

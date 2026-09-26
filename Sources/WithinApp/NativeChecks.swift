@@ -4,6 +4,16 @@ import WithinCore
 /// Uses a uniquely named, synthetic pasteboard. Never reads the user's clipboard.
 @MainActor
 func nativeChecks(to output: URL) throws {
+    let manifest = try loadManifest()
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "microphoneUID"]
+    let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
+    var readinessPassed = true
+    for (state, expected) in [("ready", true), ("setup", false), ("model-error", false), ("missing-input", false), ("permission", true), ("recovery", false), ("recording", false)] {
+        let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
+        model.configurePreview(state)
+        readinessPassed = readinessPassed && model.canStart == expected
+    }
+    let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
     defer { board.releaseGlobally() }
     board.clearContents()
@@ -31,8 +41,9 @@ func nativeChecks(to output: URL) throws {
     do { _ = try CompatibilityPaste.snapshot(board) } catch { oversizeRefused = true }
     let report: [String: Any] = ["syntheticNamedPasteboardOnly": true, "multiItemMultiFormatRestored": roundtrip, "restorationWriteSucceeded": restored,
         "newUserCopyPreserved": userCopyPreserved, "oversizedSnapshotRefused": oversizeRefused,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused,
+        "readinessStatesPassed": readinessPassed, "previewPreferencesUnchanged": previewPreferencesUnchanged,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged,
         "notTested": ["global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged else { throw CompatibilityPaste.Failure.writeFailed }
 }

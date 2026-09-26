@@ -19,17 +19,24 @@ func renderPreviews(to directory: URL) throws {
         try png.write(to: directory.appendingPathComponent(name + ".png"))
         window.orderOut(nil)
     }
-    for state in ["setup", "ready", "recovery", "recording"] {
+    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
-        if state == "recovery" {
-            try render("within-recovery", view: RecoveryView(model: model), size: NSSize(width: 621, height: 430))
-        } else if state == "recording" {
-            try render("within-recording", view: PillView(model: model), size: NSSize(width: 348, height: 82))
-        } else {
-            try render("within-\(state)", view: MainView(model: model), size: NSSize(width: 800, height: 740))
-            try render("within-\(state)-dark", view: MainView(model: model), size: NSSize(width: 800, height: 740), dark: true)
-            if state == "ready" { try render("within-settings", view: MainView(model: model, section: "Settings"), size: NSSize(width: 800, height: 950)) }
+        for dark in [false, true] {
+            let name = "within-\(state)\(dark ? "-dark" : "")"
+            switch state {
+            case "recovery": try render(name, view: RecoveryView(model: model), size: NSSize(width: 620, height: 500), dark: dark)
+            case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: 82), dark: dark)
+            case "practice": try render(name, view: PracticeView(model: model), size: NSSize(width: 600, height: 510), dark: dark)
+            default: try render(name, view: MainView(model: model), size: NSSize(width: 560, height: 580), dark: dark)
+            }
+            if state == "ready" {
+                for section in ["General", "Audio", "Privacy", "Model", "About"] {
+                    try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: SettingsView(model: model, selection: section), size: NSSize(width: 640, height: 630), dark: dark)
+                }
+                try render("within-help\(dark ? "-dark" : "")", view: HelpView(model: model), size: NSSize(width: 600, height: 590), dark: dark)
+                try render("within-welcome\(dark ? "-dark" : "")", view: SetupView(model: model), size: NSSize(width: 600, height: 600), dark: dark)
+            }
         }
     }
 }

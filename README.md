@@ -34,6 +34,14 @@ The scripts fetch a pinned FluidAudio source revision, apply the checked-in patc
 
 Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. The default shortcut is Control–Shift–Space, with Control–Shift–D available in Settings. Compatibility paste is experimental and off by default.
 
+## Using the app
+
+Within opens a Home window and appears in the Dock, Command-Tab switcher, and menu bar. **Continue setup** walks through permissions and the local model. **Try dictation** opens a temporary practice window; recording starts only when you choose **Start practice** or use the shortcut. For another app, focus its text field before using the shortcut.
+
+Open Settings with **Command-comma** and help from the toolbar or Help menu. Closing Home leaves shortcuts and the menu bar available; click Within in the Dock to reopen it. **Quit Within** exits completely and asks before discarding an active session or pending dictation. Practice text lasts until you clear it or quit.
+
+After building, you can copy `build/Within.app` into Applications for a stable launch location. Local ad-hoc rebuilds may require macOS to approve permissions again. Native Liquid Glass controls are used on macOS 26 and later, with standard controls on earlier systems; content supports light and dark appearance.
+
 ## Contribute
 
 Read [contributing](CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), and the [publication policy](docs/PUBLICATION.md). Reports should use synthetic text and include only the details needed to reproduce the issue.

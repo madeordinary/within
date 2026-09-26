@@ -26,6 +26,8 @@ README.md
 Sources/WithinApp/AccessibilityTarget.swift
 Sources/WithinApp/AppDelegate.swift
 Sources/WithinApp/AppModel.swift
+Sources/WithinApp/DesignSystem.swift
+Sources/WithinApp/SettingsView.swift
 Sources/WithinApp/CaptureEngine.swift
 Sources/WithinApp/CompatibilityPaste.swift
 Sources/WithinApp/LocalSpeech.swift
