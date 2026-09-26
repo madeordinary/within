@@ -32,10 +32,14 @@ func renderPreviews(to directory: URL) throws {
             }
             if state == "ready" {
                 for section in ["General", "Audio", "Privacy", "Model", "About"] {
-                    try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: SettingsView(model: model, selection: section), size: NSSize(width: 640, height: 630), dark: dark)
+                    model.settingsSection = section
+                    try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: SettingsView(model: model), size: NSSize(width: 640, height: 630), dark: dark)
                 }
                 try render("within-help\(dark ? "-dark" : "")", view: HelpView(model: model), size: NSSize(width: 600, height: 590), dark: dark)
                 try render("within-welcome\(dark ? "-dark" : "")", view: SetupView(model: model), size: NSSize(width: 600, height: 600), dark: dark)
+                for step in 1...3 {
+                    try render("within-setup-step-\(step + 1)\(dark ? "-dark" : "")", view: SetupView(model: model, step: step), size: NSSize(width: 600, height: 600), dark: dark)
+                }
             }
         }
     }

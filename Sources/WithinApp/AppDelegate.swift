@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             model.showMain = { [weak self] in self?.showMainWindow() }
             model.showSettings = { [weak self] in self?.showSettingsWindow() }
             model.showAudioSettings = { [weak self] in self?.showSettingsWindow(section: "Audio") }
+            model.showModelSettings = { [weak self] in self?.showSettingsWindow(section: "Model") }
             model.showHelp = { [weak self] in self?.showHelpWindow() }
             model.showSetup = { [weak self] in self?.showSetupWindow() }
             model.showPractice = { [weak self] in self?.showPracticeWindow() }
@@ -45,13 +46,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             makeMenu()
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard event.keyCode == 53, let self, self.model.phase != .ready else { return event }
-                if self.model.phase == .recovery { self.recoveryWindow?.orderOut(nil) }
+                guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return event }
+                if self.model.phase == .recovery {
+                    guard Self.canHideRecovery(for: event.window, recovery: self.recoveryWindow) else { return event }
+                    self.recoveryWindow?.orderOut(nil)
+                }
                 else { self.model.cancel(cause: .escape) }
                 return nil
             }
             refreshStatus()
             let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(keyAELaunchedAsLogInItem)) != nil
-            if !loginLaunch || !UserDefaults.standard.bool(forKey: "setupComplete") { showMainWindow() }
+            if !loginLaunch || !model.setupComplete { showMainWindow() }
         } catch {
             let alert = NSAlert(); alert.messageText = "Within couldn’t start."; alert.informativeText = "The app resources or local support folder are unavailable. Rebuild or reinstall the app and try again."; alert.runModal()
             NSApp.terminate(nil)
@@ -65,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             let alert = NSAlert(); alert.messageText = "Quit and discard this dictation?"
             alert.informativeText = "Within doesn’t save recordings or pending words. Anything waiting here will be discarded."
             alert.addButton(withTitle: "Keep Within open"); alert.addButton(withTitle: "Quit and discard")
-            if alert.runModal() != .alertSecondButtonReturn { return .terminateCancel }
+            if runConfirmation(alert) != .alertSecondButtonReturn { return .terminateCancel }
         }
         model.shutdown(); return .terminateNow
     }
@@ -129,7 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; return item
     }
-    @objc private func toggleDictation() { if model.isActive { model.stop() } else { model.start(practice: false) } }
+    @objc private func toggleDictation() { if model.isActive { model.stop() } else { model.startFromCurrentWindow() } }
     @objc private func cancelDictation() { model.cancel() }
     @objc private func reviewWords() { showRecoveryWindow() }
     @objc private func openWithin() { showMainWindow() }
@@ -163,11 +168,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         }
         present(mainWindow)
     }
-    private func showSettingsWindow(section: String = "General") {
+    private func showSettingsWindow(section: String? = nil) {
+        if let section { model.settingsSection = section }
         if settingsWindow == nil {
-            settingsWindow = makeWindow("Within Settings", size: NSSize(width: 640, height: 630), minimum: NSSize(width: 620, height: 590), autosave: "Within.Settings.v2", view: SettingsView(model: model, selection: section))
-        } else {
-            settingsWindow?.contentView = NSHostingView(rootView: SettingsView(model: model, selection: section))
+            settingsWindow = makeWindow("Within Settings", size: NSSize(width: 640, height: 630), minimum: NSSize(width: 620, height: 590), autosave: "Within.Settings.v2", view: SettingsView(model: model))
         }
         present(settingsWindow)
     }
@@ -190,12 +194,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         present(practiceWindow)
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard sender === practiceWindow, model.isPracticeSession, model.workerBusy else { return true }
+        guard sender === practiceWindow, model.hasActivePracticeSession else { return true }
+        let closingSessionID = model.session.id
         let alert = NSAlert(); alert.messageText = "Cancel this practice recording?"
         alert.informativeText = "Closing now cancels the current recording or transcription. Earlier practice text stays available until you clear it or quit."
         alert.addButton(withTitle: "Keep practicing"); alert.addButton(withTitle: "Cancel and close")
-        guard alert.runModal() == .alertSecondButtonReturn else { return false }
-        model.cancel(); return true
+        guard runConfirmation(alert) == .alertSecondButtonReturn else { return false }
+        // The worker can finish while a native confirmation is open.
+        if model.shouldCancelPracticeOnClose(sessionID: closingSessionID) { model.cancel() }
+        return true
+    }
+    static func canHideRecovery(for eventWindow: NSWindow?, recovery: NSWindow?) -> Bool {
+        guard let recovery, eventWindow === recovery, recovery.attachedSheet == nil else { return false }
+        return true
+    }
+    private func runConfirmation(_ alert: NSAlert) -> NSApplication.ModalResponse {
+        model.suspendEscapeShortcut()
+        defer { model.resumeEscapeShortcut() }
+        return alert.runModal()
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("Within.Help"), .init("Within.Settings")] }

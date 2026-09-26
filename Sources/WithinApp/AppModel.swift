@@ -25,9 +25,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var devices: [MicrophoneDevice] = []
     @Published private(set) var loginEnabled = false
     @Published private(set) var loginMessage = ""
+    @Published var settingsSection = "General"
+    @Published private(set) var setupComplete: Bool
     @Published var soundsEnabled: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(soundsEnabled, forKey: "soundsEnabled") } }
     private var lastErrorCode = "none"
     private var lastModelCheck = "not_checked"
+    private let readinessWaitMessage = "Local speech is busy. Try again when it’s ready."
     private var stopDiagnostics = RecordingStopTracker()
     @Published var practiceText = ""
     @Published private(set) var isPracticeSession = false
@@ -63,6 +66,7 @@ final class AppModel: ObservableObject {
     var showMain: (() -> Void)?
     var showSettings: (() -> Void)?
     var showAudioSettings: (() -> Void)?
+    var showModelSettings: (() -> Void)?
     var showHelp: (() -> Void)?
     var showSetup: (() -> Void)?
     var showPractice: (() -> Void)?
@@ -82,6 +86,12 @@ final class AppModel: ObservableObject {
     var targetName: String { target?.appName ?? "original app" }
     var canReturn: Bool { recoveryReason?.permitsReturn == true && target != nil && !returning }
     var isActive: Bool { phase == .preparing || phase == .recording }
+    var hasActivePracticeSession: Bool { isPracticeSession && (isActive || phase == .transcribing) }
+    var startsInPractice: Bool { practiceWindowIsActive?() == true }
+    func shouldCancelPracticeOnClose(sessionID: UUID?) -> Bool {
+        guard let sessionID else { return false }
+        return hasActivePracticeSession && session.isCurrent(sessionID)
+    }
 
     init(manifest: ModelManifest, base: URL, preview: Bool = false) {
         self.manifest = manifest
@@ -92,11 +102,12 @@ final class AppModel: ObservableObject {
         mode = ActivationMode(rawValue: UserDefaults.standard.string(forKey: "activationMode") ?? "hold") ?? .hold
         alternateShortcut = UserDefaults.standard.bool(forKey: "alternateShortcut")
         microphoneUID = UserDefaults.standard.string(forKey: "microphoneUID") ?? ""
+        setupComplete = UserDefaults.standard.bool(forKey: "setupComplete")
         if preview { return }
         shortcut.onDown = { [weak self] in
             guard let self else { return }
             switch gesture.down(mode: mode, isActive: isActive) {
-            case .start: start(practice: practiceWindowIsActive?() == true, fromShortcut: true)
+            case .start: startFromCurrentWindow(fromShortcut: true)
             case .stop: stop(cause: .togglePress)
             case nil: break
             }
@@ -175,6 +186,15 @@ final class AppModel: ObservableObject {
         }
     }
     func cancelDownload() { modelTask?.cancel() }
+    func completeSetup() {
+        setupComplete = true
+        if !previewMode { UserDefaults.standard.set(true, forKey: "setupComplete") }
+    }
+    func invalidateModelVerification() {
+        modelVerified = false
+        lastModelCheck = "failed"
+        modelMessage = "Model files failed verification. Remove the model and download a fresh copy."
+    }
     func removeModel() {
         guard !modelBusy, !workerBusy, phase == .ready else { return }
         modelBusy = true
@@ -187,13 +207,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func startFromCurrentWindow(fromShortcut: Bool = false) {
+        start(practice: startsInPractice, fromShortcut: fromShortcut)
+    }
     func start(practice: Bool, fromShortcut: Bool = false) {
         refreshPermissions()
         guard canStart else {
             if phase == .recovery { showRecovery?() }
+            else if phase != .ready { announce(message) }
+            else if modelBusy || workerBusy { message = readinessWaitMessage; announce(message); notify() }
             else if !modelInstalled || !microphoneAllowed { message = "Finish setup before you dictate."; showMain?() }
             else if !selectedInputAvailable { message = "Your selected microphone is unavailable. Reconnect it or choose another in Settings."; showMain?() }
-            else if !modelVerified && !modelBusy { message = "Check the local speech model in Settings."; showSettings?() }
+            else if !modelVerified { message = "Check the local speech model in Settings."; showModelSettings?() }
             return
         }
         target?.stopObserving(); target = nil; initialBlock = nil; forcedRecovery = nil
@@ -216,10 +241,7 @@ final class AppModel: ObservableObject {
         capture.resetDiagnostics()
         trial.discard(); workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
         notify()
-        shortcut.monitorEscape { [weak self] in
-            guard let self else { return }
-            if phase == .recovery { dismissRecovery?() } else { cancel(cause: .escape) }
-        }
+        resumeEscapeShortcut()
         worker = Task { [weak self] in
             guard let self else { return }
             do {
@@ -253,7 +275,7 @@ final class AppModel: ObservableObject {
                     releaseTarget(); announce(message)
                 }
                 else if practice {
-                    UserDefaults.standard.set(true, forKey: "setupComplete")
+                    completeSetup()
                     practiceText += (practiceText.isEmpty ? "" : "\n") + text
                     session.finish(id); message = "Your words arrived. Try the shortcut in another app."; releaseTarget(); announce("Practice dictation finished")
                 } else { await deliver(text, id: id) }
@@ -261,13 +283,14 @@ final class AppModel: ObservableObject {
                 capture.stop(); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
                 if session.isCurrent(id) { recordStop(.pipelineError) }
                 await speech.cancel()
+                // Model integrity is independent of whether the user canceled this session.
+                if error is IntegrityError { invalidateModelVerification() }
                 if session.isCurrent(id), case SpeechFailure.partial(let text) = error {
                     forcedRecovery = "Transcription stopped early. These are the words recovered before the error; part of your dictation may be missing."
                     await deliver(text, id: id)
                 } else if session.isCurrent(id) {
                     session.finish(id); releaseTarget()
                     lastErrorCode = error is IntegrityError ? "model_integrity" : "capture_or_inference"
-                    if error is IntegrityError { lastModelCheck = "failed"; modelMessage = "Model files failed verification. Remove the model and download a fresh copy." }
                     message = error is CancellationError ? "Canceled. Microphone off." : "Dictation stopped. Audio was discarded. Check the microphone and local model, then try again."
                     if case CaptureFailure.protectedInput = error { message = "Protected input is active. Microphone off." }
                     if case CaptureFailure.targetChanged = error { message = "The destination changed before recording. Choose your text field and try again." }
@@ -278,6 +301,12 @@ final class AppModel: ObservableObject {
             shortcut.stopEscapeMonitor()
             workerBusy = false; worker = nil; notify()
         }
+    }
+
+    func suspendEscapeShortcut() { if !previewMode { shortcut.stopEscapeMonitor() } }
+    func resumeEscapeShortcut() {
+        guard !previewMode, isActive || phase == .transcribing else { return }
+        shortcut.monitorEscape { [weak self] in self?.cancel(cause: .escape) }
     }
 
     private func startPulse(ring: AudioRing, sampleRate: Double, id: UUID) {
@@ -355,6 +384,7 @@ final class AppModel: ObservableObject {
         if trial.phase == .inserted {
             session.finish(id); releaseTarget(); message = "Inserted. Microphone off."; announce("Dictation inserted")
         } else {
+            suspendEscapeShortcut()
             _ = session.recover(text, id: id)
             if case .recovery(let reason) = trial.phase { recoveryReason = reason }
             else { recoveryReason = .uncertainWrite }
@@ -397,7 +427,13 @@ final class AppModel: ObservableObject {
         dismissRecovery?(); message = "Ready when you are."; notify()
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
-    private func notify() { stateChanged?() }
+    private func notify() {
+        if phase == .ready, !workerBusy, !modelBusy, message == readinessWaitMessage {
+            message = canStart ? "Ready when you are. Microphone off." : !modelVerified ? modelMessage : "Check your microphone and permissions in Settings."
+            announce(message)
+        }
+        stateChanged?()
+    }
     private func announce(_ text: String) {
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested, userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
@@ -483,21 +519,32 @@ final class AppModel: ObservableObject {
     }
     func configurePreview(_ state: String) {
         guard previewMode else { return }
+        modelBusy = false; workerBusy = false
         mode = .toggle; alternateShortcut = true; microphoneUID = "preview-input"
         devices = [MicrophoneDevice(id: "preview-input", objectID: 0, name: "Built-in Microphone")]
         modelInstalled = state != "setup"; microphoneAllowed = state != "setup"; accessibilityAllowed = state != "setup"
         modelVerified = modelInstalled && state != "model-error"
+        if state == "setup" { setupComplete = false }
         modelMessage = "One local model. No account."; shortcutAvailable = true
         if state == "model-error" { modelMessage = "Model unavailable. Remove it and download a fresh copy." }
         if state == "missing-input" { devices = [] }
         if state == "permission" { accessibilityAllowed = false }
         if state == "practice" { practiceText = "A little more room for an ordinary idea."; isPracticeSession = true }
-        if state == "recovery" {
+        if state == "practice-unloading" { isPracticeSession = true; workerBusy = true }
+        if state == "model-busy" { modelBusy = true }
+        if state == "practice-recording" || state == "practice-transcribing" {
+            isPracticeSession = true; workerBusy = true
+            let id = session.begin()!; _ = session.recording(id)
+            if state == "practice-transcribing" { _ = session.stopped(id) }
+        }
+        if state == "recovery" || state == "practice-recovery" {
+            isPracticeSession = state == "practice-recovery"
             let id = session.begin()!; _ = session.recover("The best ideas often start as a few ordinary words. Let’s make a little room for them.", id: id)
             recoveryReason = .focusChanged; recoveryDetail = RecoveryReason.focusChanged.explanation
         } else if state == "recording" {
             let id = session.begin()!; _ = session.recording(id); elapsed = 12; level = 0.45; audioFlowing = true
         }
+        notify()
     }
     func shutdown() { cancel(cause: .shutdown); modelTask?.cancel(); shortcut.shutdown() }
 }

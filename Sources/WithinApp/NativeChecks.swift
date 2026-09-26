@@ -4,16 +4,73 @@ import WithinCore
 /// Uses a uniquely named, synthetic pasteboard. Never reads the user's clipboard.
 @MainActor
 func nativeChecks(to output: URL) throws {
+    _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "microphoneUID"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "microphoneUID", "setupComplete"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
-    var readinessPassed = true
-    for (state, expected) in [("ready", true), ("setup", false), ("model-error", false), ("missing-input", false), ("permission", true), ("recovery", false), ("recording", false)] {
+    func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
+        return model
+    }
+    var readinessPassed = true
+    for (state, expected) in [("ready", true), ("setup", false), ("model-error", false), ("missing-input", false), ("permission", true), ("recovery", false), ("recording", false)] {
+        let model = fixture(state)
         readinessPassed = readinessPassed && model.canStart == expected
     }
+    let invalidated = fixture("ready")
+    let initiallyReady = invalidated.canStart
+    invalidated.invalidateModelVerification()
+    var openedModelSettings = false
+    invalidated.showModelSettings = { openedModelSettings = true; invalidated.settingsSection = "Model" }
+    invalidated.start(practice: true)
+    let invalidationPassed = initiallyReady && invalidated.modelInstalled && !invalidated.modelVerified
+        && !invalidated.canStart && invalidated.phase == .ready && !invalidated.workerBusy
+        && openedModelSettings && invalidated.settingsSection == "Model"
+    invalidated.showModelSettings = nil
+
+    let completedPractice = fixture("practice-unloading")
+    let activePractice = fixture("practice-recording")
+    let finishingPractice = fixture("practice-transcribing")
+    let practiceLifecyclePassed = completedPractice.workerBusy && !completedPractice.hasActivePracticeSession
+        && activePractice.hasActivePracticeSession && finishingPractice.hasActivePracticeSession
+    let recoveredPractice = fixture("practice-recovery")
+    let practiceCloseRecheckPassed = activePractice.shouldCancelPracticeOnClose(sessionID: activePractice.session.id)
+        && !activePractice.shouldCancelPracticeOnClose(sessionID: UUID())
+        && !activePractice.shouldCancelPracticeOnClose(sessionID: nil)
+        && !completedPractice.shouldCancelPracticeOnClose(sessionID: completedPractice.session.id)
+        && !recoveredPractice.shouldCancelPracticeOnClose(sessionID: recoveredPractice.session.id)
+        && !recoveredPractice.pendingText.isEmpty
+    let activeMessage = activePractice.message
+    activePractice.start(practice: true)
+    let activeFeedbackPreserved = activePractice.message == activeMessage && activePractice.phase == .recording
+    completedPractice.start(practice: true)
+    let busy = fixture("model-busy")
+    busy.start(practice: true)
+    let busyFeedbackPassed = completedPractice.message.contains("Try again") && busy.message.contains("Try again")
+        && busy.phase == .ready && !busy.workerBusy && activeFeedbackPreserved
+    busy.configurePreview("ready")
+    completedPractice.configurePreview("ready")
+    let busyFeedbackCleared = busy.canStart && completedPractice.canStart
+        && !busy.message.contains("Try again") && !completedPractice.message.contains("Try again")
+
+    let routing = fixture("ready")
+    routing.practiceWindowIsActive = { true }
+    let activeWindowRoutesToPractice = routing.startsInPractice
+    routing.practiceWindowIsActive = { false }
+    let routingPassed = activeWindowRoutesToPractice && !routing.startsInPractice
+    let setup = fixture("setup")
+    setup.completeSetup()
+    let setupPassed = setup.setupComplete && setup.phase == .ready && !setup.workerBusy && setup.practiceText.isEmpty
+
+    let recoveryWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+    let otherWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
+    let escapeScopePassed = AppDelegate.canHideRecovery(for: recoveryWindow, recovery: recoveryWindow)
+        && !AppDelegate.canHideRecovery(for: otherWindow, recovery: recoveryWindow)
+        && !AppDelegate.canHideRecovery(for: nil, recovery: recoveryWindow)
+        && !AppDelegate.canHideRecovery(for: otherWindow, recovery: nil)
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
+    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
     defer { board.releaseGlobally() }
     board.clearContents()
@@ -42,8 +99,13 @@ func nativeChecks(to output: URL) throws {
     let report: [String: Any] = ["syntheticNamedPasteboardOnly": true, "multiItemMultiFormatRestored": roundtrip, "restorationWriteSucceeded": restored,
         "newUserCopyPreserved": userCopyPreserved, "oversizedSnapshotRefused": oversizeRefused,
         "readinessStatesPassed": readinessPassed, "previewPreferencesUnchanged": previewPreferencesUnchanged,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged,
-        "notTested": ["global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver"]]
+        "modelInvalidationAndRepairPassed": invalidationPassed, "practiceLifecyclePassed": practiceLifecyclePassed,
+        "busyFeedbackPassed": busyFeedbackPassed, "practiceRoutingPassed": routingPassed,
+        "busyFeedbackCleared": busyFeedbackCleared,
+        "practiceCloseRecheckPassed": practiceCloseRecheckPassed,
+        "setupWithoutRecordingPassed": setupPassed, "recoveryEscapeScopePassed": escapeScopePassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed,
+        "notTested": ["global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

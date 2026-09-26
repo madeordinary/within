@@ -110,7 +110,7 @@ struct SessionStatusView: View {
 struct SetupView: View {
     @ObservedObject var model: AppModel
     var done: () -> Void = {}
-    @State private var step = 0
+    @State var step = 0
     private let steps = ["Welcome", "Permissions", "Local model", "Ready"]
     var body: some View {
         VStack(spacing: 0) {
@@ -145,7 +145,7 @@ struct SetupView: View {
                             .foregroundStyle(Palette.secondary)
                         if !model.selectedInputAvailable {
                             Label("Choose an available microphone in Settings before recording.", systemImage: "exclamationmark.triangle").foregroundStyle(Palette.warning)
-                            Button("Open Settings…") { model.showSettings?() }
+                            Button("Open Settings…") { model.showAudioSettings?() }
                         }
                     }
                 }.font(.system(size: 13)).padding(30).frame(maxWidth: .infinity, alignment: .leading)
@@ -158,8 +158,8 @@ struct SetupView: View {
                     Button("Continue") { step += 1 }.primaryAction()
                         .disabled((step == 1 && !model.microphoneAllowed) || (step == 2 && (!model.modelVerified || model.modelBusy)))
                 } else {
-                    Button("Done", action: done)
-                    Button("Try dictation") { done(); model.showPractice?() }.primaryAction().disabled(!model.canStart)
+                    Button("Done") { model.completeSetup(); done() }
+                    Button("Try dictation") { model.completeSetup(); done(); model.showPractice?() }.primaryAction().disabled(!model.canStart)
                 }
             }.padding(24)
         }.frame(minWidth: 540, minHeight: 520).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)
@@ -188,7 +188,7 @@ struct PracticeView: View {
                 }
                 Spacer()
                 Button("Clear") { model.practiceText = "" }.disabled(model.practiceText.isEmpty || model.workerBusy)
-                Button("Done", action: done).disabled(model.workerBusy && model.isPracticeSession)
+                Button("Done", action: done).disabled(model.hasActivePracticeSession)
             }
             Text("English · up to 5 minutes · no history saved").font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }.padding(28).frame(minWidth: 540, minHeight: 460).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)

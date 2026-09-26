@@ -26,11 +26,10 @@ struct ActivationControls: View {
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
-    @State var selection = "General"
     @State private var pasteDisclosure = false
     @State private var showingDiagnostics = false
     var body: some View {
-        TabView(selection: $selection) {
+        TabView(selection: $model.settingsSection) {
             page {
                 heading("Your everyday rhythm", detail: "Choose how you start and finish dictation.")
                 ActivationControls(model: model).withinSurface()
