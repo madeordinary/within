@@ -31,7 +31,9 @@ App-managed storage consists of:
 - An empty single-instance lock in the same application-support folder.
 - Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection; no dictation content.
 
-Core ML may also create OS-managed compiled-model caches. Microphone permission is required for recording. Accessibility is optional for practice/Copy and required for insertion. Start at login is an explicit Settings choice. The preview is a single process with Hardened Runtime and an audio-input entitlement; App Sandbox compatibility and trusted public signing remain release gates.
+Core ML may also create OS-managed compiled-model caches. Microphone permission is required for recording. Accessibility is optional for practice/Copy and required for insertion and global modifier-only shortcuts. Start at login is an explicit Settings choice. The preview is a single process with Hardened Runtime and an audio-input entitlement; App Sandbox compatibility and trusted public signing remain release gates.
+
+Custom shortcuts store only the chosen key and modifiers in preferences. The shortcut recorder operates within its own window while dictation shortcuts are paused. Choosing a single modifier enables local/global modifier, key-down, mouse-down and scroll event observation to distinguish the chosen side and reject ordinary combinations. Outside the explicit recorder, this path does not read characters, log keystrokes, or keep event history. Hardware checks run during a modifier press and during hold-to-talk release detection. Modifier shortcuts do not claim exclusive ownership; another app can use the same key.
 
 ## Diagnostics and removal
 

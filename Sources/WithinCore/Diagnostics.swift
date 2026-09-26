@@ -14,6 +14,7 @@ public enum RecordingStopCause: String, Encodable {
     case hotKeyRelease = "hot_key_release"
     case holdWatchdog = "hold_watchdog"
     case togglePress = "toggle_press"
+    case shortcutInterrupted = "shortcut_interrupted"
     case stopButton = "stop_button"
     case cancelButton = "cancel_button"
     case escape, shutdown

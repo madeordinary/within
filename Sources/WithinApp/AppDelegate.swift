@@ -183,7 +183,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func showSetupWindow() {
         if setupWindow == nil {
-            setupWindow = makeWindow("Set Up Within", size: NSSize(width: 600, height: 600), minimum: NSSize(width: 560, height: 570), autosave: "Within.Setup.v2", view: SetupView(model: model, done: { [weak self] in self?.setupWindow?.close() }))
+            setupWindow = makeWindow("Set Up Within", size: NSSize(width: 540, height: 650), minimum: NSSize(width: 540, height: 600), autosave: "Within.Setup.v3", view: SetupView(model: model, done: { [weak self] in self?.setupWindow?.close() }))
         }
         present(setupWindow)
     }

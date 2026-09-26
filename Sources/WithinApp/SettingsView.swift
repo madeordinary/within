@@ -1,8 +1,36 @@
+import AppKit
 import SwiftUI
 import WithinCore
 
+struct MicrophoneControls: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 10) {
+                Picker("Microphone", selection: $model.microphoneUID) {
+                    Text("System default").tag("")
+                    ForEach(model.devices) { Text($0.name).tag($0.id) }
+                    if !model.microphoneUID.isEmpty && !model.selectedInputAvailable {
+                        Text("Selected microphone unavailable").tag(model.microphoneUID)
+                    }
+                }.disabled(model.workerBusy || model.phase != .ready)
+                Button(action: model.refreshPermissions) {
+                    Image(systemName: "arrow.clockwise")
+                }.help("Refresh microphones and permissions")
+                    .accessibilityLabel("Refresh microphones and permissions")
+            }
+            if !model.selectedInputAvailable {
+                Label(model.devices.isEmpty ? "No microphone found. Connect one, then refresh." : "This microphone is disconnected. Choose another or reconnect it.", systemImage: "exclamationmark.triangle")
+                    .font(.system(size: 12)).foregroundStyle(Palette.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }.onAppear { model.refreshPermissions() }
+    }
+}
+
 struct ActivationControls: View {
     @ObservedObject var model: AppModel
+    @State private var recordingShortcut = false
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Picker("Recording gesture", selection: $model.mode) {
@@ -11,16 +39,184 @@ struct ActivationControls: View {
             }.pickerStyle(.segmented).disabled(model.workerBusy || model.phase != .ready)
             Text(model.mode == .hold ? "Hold the shortcut while speaking. Release to finish." : "Press once to start and again to finish. No need to hold the keys.")
                 .font(.system(size: 12)).foregroundStyle(Palette.secondary)
-            Picker("Shortcut", selection: $model.alternateShortcut) {
-                Text("Control + Shift + Space").tag(false)
-                Text("Control + Shift + D").tag(true)
-            }.disabled(model.workerBusy || model.phase != .ready)
-            if !model.shortcutAvailable {
-                Label("Shortcut unavailable. Choose the other option or use the menu bar.", systemImage: "exclamationmark.triangle")
+            HStack {
+                Text("Shortcut")
+                Spacer()
+                Text(model.shortcutLabel).font(.system(size: 14, weight: .medium, design: .monospaced))
+                    .accessibilityLabel(model.dictationShortcut.accessibilityName)
+                Button("Change…") { recordingShortcut = model.beginShortcutEditing() }
+                    .accessibilityLabel("Change dictation shortcut")
+            }.disabled(model.workerBusy || model.phase != .ready || model.editingShortcut)
+            if model.dictationShortcut.isModifierOnly && !model.accessibilityAllowed {
+                HStack(alignment: .top) {
+                    Text("Allow Accessibility to use this modifier key outside Within. Practice can still use its Start button.")
+                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                    Button("Allow…", action: model.requestAccessibility).accessibilityLabel("Allow Accessibility for shortcut")
+                }
+            } else if !model.shortcutAvailable {
+                Label("Shortcut unavailable. Choose another or use the menu bar.", systemImage: "exclamationmark.triangle")
                     .font(.system(size: 12)).foregroundStyle(Palette.warning)
             }
+            if !model.shortcutMessage.isEmpty { Text(model.shortcutMessage).font(.system(size: 12)).foregroundStyle(Palette.warning) }
             Text("Escape cancels. Recording stops at five minutes.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }
+        .sheet(isPresented: $recordingShortcut, onDismiss: model.endShortcutEditing) {
+            ShortcutRecorderView(model: model)
+        }
+    }
+}
+
+struct ShortcutRecorderView: View {
+    @ObservedObject var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var candidate: DictationShortcut?
+    @State private var keysReleased = true
+    @State private var hint = "Press a key combination, or press and release Right Control."
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text("Choose your shortcut").font(.system(size: 24, weight: .semibold))
+            Text("Try Right Control, or a combination such as Control + Shift + D. Dictation is paused while you choose.")
+                .font(.system(size: 13)).foregroundStyle(Palette.secondary)
+            VStack(spacing: 10) {
+                Text(candidate?.displayName ?? "Press your shortcut")
+                    .font(.system(size: 22, weight: .medium, design: .monospaced))
+                    .accessibilityHidden(true)
+                Text(keysReleased ? hint : "Release all keys to use this shortcut.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.secondary).multilineTextAlignment(.center)
+                    .accessibilityHidden(true)
+            }.frame(maxWidth: .infinity, minHeight: 105).padding(16)
+                .background(Palette.surface, in: RoundedRectangle(cornerRadius: 14))
+                .overlay(RoundedRectangle(cornerRadius: 14).stroke(Palette.line))
+                .overlay(ShortcutCaptureField { binding, released, explanation in
+                    candidate = binding; keysReleased = released
+                    if let explanation { hint = explanation }
+                })
+            Text("Choose a key you don’t use for typing or another dictation app. Control, Right Option and Right Command can work alone. Left and right are separate choices.")
+                .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+            if !model.shortcutMessage.isEmpty { Text(model.shortcutMessage).font(.system(size: 12)).foregroundStyle(Palette.warning) }
+            HStack {
+                Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Use shortcut") {
+                    if let candidate, model.chooseShortcut(candidate) { dismiss() }
+                }.primaryAction().disabled(candidate == nil || !keysReleased)
+            }
+        }.padding(28).frame(width: 430).background(Palette.canvas).foregroundStyle(Palette.text)
+            .onDisappear { model.endShortcutEditing() }
+    }
+}
+
+/// An explicit, window-local recorder. Events are never saved; only its chosen binding is returned.
+private struct ShortcutCaptureField: NSViewRepresentable {
+    let changed: (DictationShortcut?, Bool, String?) -> Void
+    func makeNSView(context: Context) -> ShortcutCaptureNSView { ShortcutCaptureNSView(changed: changed) }
+    func updateNSView(_ nsView: ShortcutCaptureNSView, context: Context) {}
+}
+
+final class ShortcutCaptureNSView: NSView {
+    let changed: (DictationShortcut?, Bool, String?) -> Void
+    private var candidate: DictationShortcut?
+    private var modifierCandidate: UInt16?
+    private var sawKey = false
+    private var keyIsDown = false
+    private var invalidCombination = false
+    private var lastAnnouncement: String?
+    init(changed: @escaping (DictationShortcut?, Bool, String?) -> Void) {
+        self.changed = changed; super.init(frame: .zero)
+        setAccessibilityElement(true); setAccessibilityRole(.group)
+        setAccessibilityLabel("Dictation shortcut recorder")
+        setAccessibilityValue("Press your shortcut")
+        setAccessibilityHelp("Press Control, Right Option or Right Command alone, or a combination containing Control or Command. Tab moves to the buttons. Click this box to record again.")
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(self) }
+    override func becomeFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func resignFirstResponder() -> Bool { needsDisplay = true; return true }
+    override func draw(_ dirtyRect: NSRect) {
+        guard window?.firstResponder === self else { return }
+        NSColor.keyboardFocusIndicatorColor.setStroke()
+        let ring = NSBezierPath(roundedRect: bounds.insetBy(dx: 2, dy: 2), xRadius: 12, yRadius: 12)
+        ring.lineWidth = 3; ring.stroke()
+    }
+    private func publish(released: Bool, explanation: String? = nil) {
+        let detail = released && candidate != nil ? "Shortcut selected. Click here or press another shortcut to change it." : explanation
+        changed(candidate, released, detail)
+        let value = candidate?.accessibilityName ?? "No shortcut selected"
+        setAccessibilityValue(value)
+        if released {
+            let announcement = candidate.map { "\($0.accessibilityName) selected" } ?? detail
+            if let announcement, announcement != lastAnnouncement {
+                lastAnnouncement = announcement
+                NSAccessibility.post(element: self, notification: .announcementRequested,
+                    userInfo: [.announcement: announcement, .priority: NSAccessibilityPriorityLevel.high.rawValue])
+            }
+        }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if let window { DispatchQueue.main.async { [weak self, weak window] in if let self { window?.makeFirstResponder(self) } } }
+    }
+    private func modifiers(_ event: NSEvent) -> UInt8 {
+        ShortcutManager.modifiers(CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue)))
+    }
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard window?.firstResponder === self, event.type == .keyDown else { return super.performKeyEquivalent(with: event) }
+        if event.keyCode == 53 || (event.keyCode == 48 && modifiers(event) & ~DictationShortcut.shift == 0) { return false }
+        keyDown(with: event); return true
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 { window?.cancelOperation(nil); return }
+        if event.keyCode == 48 && modifiers(event) & ~DictationShortcut.shift == 0 {
+            if event.modifierFlags.contains(.shift) { window?.selectPreviousKeyView(nil) }
+            else { window?.selectNextKeyView(nil) }
+            return
+        }
+        guard !event.isARepeat else { return }
+        sawKey = true; keyIsDown = true
+        let special: [UInt16: String] = [49: "Space", 36: "Return", 48: "Tab", 51: "Delete", 123: "←", 124: "→", 125: "↓", 126: "↑",
+            122: "F1", 120: "F2", 99: "F3", 118: "F4", 96: "F5", 97: "F6", 98: "F7", 100: "F8", 101: "F9", 109: "F10", 103: "F11", 111: "F12",
+            105: "F13", 107: "F14", 113: "F15", 106: "F16", 64: "F17", 79: "F18", 80: "F19", 90: "F20",
+            115: "Home", 119: "End", 116: "Page Up", 121: "Page Down", 117: "Forward Delete",
+            65: "Keypad .", 67: "Keypad *", 69: "Keypad +", 71: "Clear", 75: "Keypad /", 76: "Keypad Enter", 78: "Keypad -", 81: "Keypad =",
+            82: "Keypad 0", 83: "Keypad 1", 84: "Keypad 2", 85: "Keypad 3", 86: "Keypad 4", 87: "Keypad 5", 88: "Keypad 6", 89: "Keypad 7", 91: "Keypad 8", 92: "Keypad 9"]
+        let label = special[event.keyCode] ?? event.charactersIgnoringModifiers?.uppercased() ?? ""
+        let binding = DictationShortcut(keyCode: event.keyCode, modifiers: modifiers(event), keyLabel: label)
+        candidate = binding.isValid ? binding : nil
+        invalidCombination = !binding.isValid
+        publish(released: false, explanation: binding.isValid ? "Release all keys to use this shortcut." : "Use Control or Command with a key that isn’t reserved for editing or macOS. Escape cancels.")
+    }
+    override func keyUp(with event: NSEvent) {
+        keyIsDown = false
+        let released = modifiers(event) == 0
+        publish(released: released)
+        if released { sawKey = false; modifierCandidate = nil; invalidCombination = false }
+    }
+    override func flagsChanged(with event: NSEvent) {
+        if event.keyCode == 63 || event.keyCode == 57 {
+            candidate = nil; modifierCandidate = nil; invalidCombination = true
+            publish(released: false, explanation: "Fn/Globe and Caps Lock aren’t supported here. Choose another key.")
+            return
+        }
+        let flags = modifiers(event)
+        if !sawKey {
+            if flags != 0, DictationShortcut.modifierName(for: event.keyCode) != nil {
+                let held: [UInt16] = [54, 55, 56, 60, 58, 61, 59, 62].filter {
+                    ShortcutManager.modifierIsDown(keyCode: $0, eventFlags: event.modifierFlags.rawValue)
+                }
+                if held.count == 1 && modifierCandidate == nil && !invalidCombination {
+                    modifierCandidate = event.keyCode
+                } else if held.count > 1 { invalidCombination = true; modifierCandidate = nil; candidate = nil }
+            }
+            if flags == 0, let code = modifierCandidate, !invalidCombination {
+                let binding = DictationShortcut(keyCode: code, modifiers: 0, keyLabel: DictationShortcut.modifierName(for: code)!)
+                candidate = binding.isValid ? binding : nil
+                invalidCombination = !binding.isValid
+            }
+        }
+        publish(released: flags == 0 && !keyIsDown, explanation: invalidCombination ? "Use Control, Right Option or Right Command alone, or a combination containing Control or Command." : nil)
+        if flags == 0 && !keyIsDown { modifierCandidate = nil; sawKey = false; invalidCombination = false }
     }
 }
 
@@ -43,18 +239,7 @@ struct SettingsView: View {
             }.tabItem { Label("General", systemImage: "slider.horizontal.3") }.tag("General")
             page {
                 heading("Your microphone", detail: "Choose an input. Within never silently switches it during dictation.")
-                VStack(alignment: .leading, spacing: 14) {
-                    Picker("Input", selection: $model.microphoneUID) {
-                        Text("System default").tag("")
-                        ForEach(model.devices) { Text($0.name).tag($0.id) }
-                        if !model.microphoneUID.isEmpty && !model.selectedInputAvailable { Text("Selected microphone unavailable").tag(model.microphoneUID) }
-                    }.disabled(model.workerBusy || model.phase != .ready)
-                    if !model.selectedInputAvailable {
-                        Label("Reconnect your microphone or deliberately choose another input.", systemImage: "exclamationmark.triangle")
-                            .font(.system(size: 12)).foregroundStyle(Palette.warning)
-                    }
-                    Button("Refresh devices & permissions", action: model.refreshPermissions)
-                }.withinSurface()
+                MicrophoneControls(model: model).withinSurface()
                 VStack(alignment: .leading, spacing: 18) {
                     PermissionRow(title: "Microphone", detail: "Used only after you start dictation.", allowed: model.microphoneAllowed, action: model.requestMicrophone)
                     Divider()

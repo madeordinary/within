@@ -14,6 +14,10 @@ Within is a native macOS app built with SwiftUI and AppKit, with a regular Dock 
 
 Home, Settings, Setup, Help, Practice, and recovery are separate native windows. Closing Home keeps the process available; reopening from the Dock presents Home. The recording panel cannot become the key or main window. Practice routes a shortcut into its temporary field only while that window is active; opening any window does not start capture. Model installation and successful verification are separate readiness states.
 
+Custom key combinations use Carbon hotkeys; supported individual modifiers use AppKit event monitors with Accessibility for global events. Hold mode arms after 350 ms; toggle mode requires a short tap and observed release. Key, modifier, mouse-down and scroll combinations interrupt modifier gestures. The selected hardware key supplies missed-release recovery. Explicit shortcut editing unregisters dictation bindings and blocks capture. Legacy preset preferences migrate without changing the user's selected chord; downgrading to an older build restores its prior preset. Setup, Practice, and Audio settings share the same microphone picker and active-session lockout.
+
+Diagnostic schema 3's shortcut booleans report Control, Shift and the selected trigger key. They do not describe the full custom binding or its Command/Option state; do not infer shortcut availability or all held modifiers from that snapshot.
+
 Capture follows an explicit action, verified model preparation, an audio tap, the bounded ring, and a serial inference consumer. The ring bounds queued audio to 20 seconds and a session is capped at five minutes. Overflow stops capture; available text goes to review. Audio is not persisted by the app.
 
 The original application, window, control, focus history, and secure-input state are checked before insertion. A failed write is uncertain and is not automatically retried. Recovery keeps words available for an explicit user action. Accessibility cannot make focus checking and writing atomic, so real target-app validation remains required.

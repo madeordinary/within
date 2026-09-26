@@ -36,10 +36,17 @@ func renderPreviews(to directory: URL) throws {
                     try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: SettingsView(model: model), size: NSSize(width: 640, height: 630), dark: dark)
                 }
                 try render("within-help\(dark ? "-dark" : "")", view: HelpView(model: model), size: NSSize(width: 600, height: 590), dark: dark)
-                try render("within-welcome\(dark ? "-dark" : "")", view: SetupView(model: model), size: NSSize(width: 600, height: 600), dark: dark)
+                try render("within-welcome\(dark ? "-dark" : "")", view: SetupView(model: model), size: NSSize(width: 540, height: 650), dark: dark)
                 for step in 1...3 {
-                    try render("within-setup-step-\(step + 1)\(dark ? "-dark" : "")", view: SetupView(model: model, step: step), size: NSSize(width: 600, height: 600), dark: dark)
+                    try render("within-setup-step-\(step + 1)\(dark ? "-dark" : "")", view: SetupView(model: model, step: step), size: NSSize(width: 540, height: 650), dark: dark)
                 }
+                let shortcutPreview = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
+                shortcutPreview.configurePreview("ready"); shortcutPreview.chooseShortcut(.rightControl)
+                try render("within-shortcut-right-control\(dark ? "-dark" : "")", view: SetupView(model: shortcutPreview, step: 3), size: NSSize(width: 540, height: 650), dark: dark)
+                try render("within-shortcut-recorder\(dark ? "-dark" : "")", view: ShortcutRecorderView(model: shortcutPreview), size: NSSize(width: 486, height: 430), dark: dark)
+            }
+            if state == "setup" || state == "missing-input" {
+                try render("within-setup-microphone-\(state)\(dark ? "-dark" : "")", view: SetupView(model: model, step: 1), size: NSSize(width: 540, height: 600), dark: dark)
             }
         }
     }

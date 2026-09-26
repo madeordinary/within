@@ -32,7 +32,7 @@ open build/Within.app
 
 The scripts fetch a pinned FluidAudio source revision, apply the checked-in patch, and build locally. Dependency preparation requires network access. The default app signature is ad hoc; it does not establish a trusted distribution identity. Model weights are downloaded separately after choosing **Download local model** in the app.
 
-Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. The default shortcut is Control–Shift–Space, with Control–Shift–D available in Settings. Compatibility paste is experimental and off by default.
+Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. Setup and Practice include a microphone selector. The default shortcut is Control–Shift–Space; choose **Change…** in setup or Settings to record another combination or a single left/right modifier, including Right Control. Modifier-only shortcuts require Accessibility for use in other apps. Shortcut editing never starts dictation. Compatibility paste is experimental and off by default.
 
 ## Using the app
 

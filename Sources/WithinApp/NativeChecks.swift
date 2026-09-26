@@ -6,7 +6,7 @@ import WithinCore
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "microphoneUID", "setupComplete"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -63,6 +63,54 @@ func nativeChecks(to output: URL) throws {
     setup.completeSetup()
     let setupPassed = setup.setupComplete && setup.phase == .ready && !setup.workerBusy && setup.practiceText.isEmpty
 
+    let shortcutSetup = fixture("ready")
+    let editingBegan = shortcutSetup.beginShortcutEditing()
+    shortcutSetup.start(practice: true)
+    let editingDidNotRecord = !shortcutSetup.canStart && shortcutSetup.phase == .ready && !shortcutSetup.workerBusy
+    let shortcutChosen = shortcutSetup.chooseShortcut(.rightControl)
+    shortcutSetup.endShortcutEditing()
+    let validShortcutKept = shortcutSetup.dictationShortcut == .rightControl && shortcutSetup.canStart
+    let invalidShortcutRejected = !shortcutSetup.chooseShortcut(DictationShortcut(keyCode: 0, modifiers: 0, keyLabel: "A"))
+        && shortcutSetup.dictationShortcut == .rightControl
+    _ = shortcutSetup.beginShortcutEditing(); shortcutSetup.endShortcutEditing()
+    let canceledEditKept = shortcutSetup.dictationShortcut == .rightControl
+    let activeShortcutRefused = !activePractice.beginShortcutEditing() && !activePractice.chooseShortcut(.rightControl)
+    let shortcutEditingPassed = editingBegan && editingDidNotRecord && shortcutChosen && validShortcutKept
+        && invalidShortcutRejected && canceledEditKept && activeShortcutRefused
+    let microphoneSetup = fixture("ready")
+    microphoneSetup.microphoneUID = "disconnected-fixture"
+    let missingMicrophoneBlocked = !microphoneSetup.canStart
+    microphoneSetup.microphoneUID = "preview-external"
+    let microphoneSelectionPassed = missingMicrophoneBlocked && microphoneSetup.canStart
+        && microphoneSetup.selectedInputName == "USB Microphone" && microphoneSetup.phase == .ready && !microphoneSetup.workerBusy
+    let modifierSidePassed = ShortcutManager.modifierIsDown(keyCode: 62, eventFlags: 0x42000)
+        && !ShortcutManager.modifierIsDown(keyCode: 59, eventFlags: 0x42000)
+        && !ShortcutManager.modifierIsDown(keyCode: 62, eventFlags: 0x40001)
+        && ShortcutManager.modifierIsDown(keyCode: 59, eventFlags: 0x40001)
+    var recordedShortcut: DictationShortcut?
+    var recorderReleased = false
+    let recorder = ShortcutCaptureNSView { value, released, _ in recordedShortcut = value; recorderReleased = released }
+    func keyEvent(_ type: NSEvent.EventType, code: UInt16, flags: UInt, text: String = "") -> NSEvent {
+        NSEvent.keyEvent(with: type, location: .zero, modifierFlags: NSEvent.ModifierFlags(rawValue: flags), timestamp: 0,
+            windowNumber: 0, context: nil, characters: text, charactersIgnoringModifiers: text, isARepeat: false, keyCode: code)!
+    }
+    recorder.flagsChanged(with: keyEvent(.flagsChanged, code: 62, flags: 0x42000))
+    let waitsForRelease = !recorderReleased && recordedShortcut == nil
+    recorder.flagsChanged(with: keyEvent(.flagsChanged, code: 62, flags: 0))
+    let rightControlRecorded = recorderReleased && recordedShortcut == .rightControl
+    recorder.flagsChanged(with: keyEvent(.flagsChanged, code: 59, flags: 0x40001))
+    recorder.flagsChanged(with: keyEvent(.flagsChanged, code: 59, flags: 0))
+    let leftControlRecorded = recorderReleased && recordedShortcut?.keyCode == 59
+    recorder.keyDown(with: keyEvent(.keyDown, code: 2, flags: 0x60003, text: "D"))
+    recorder.keyUp(with: keyEvent(.keyUp, code: 2, flags: 0x60003, text: "D"))
+    let chordWaitsForRelease = !recorderReleased && recordedShortcut == .controlShiftD
+    recorder.flagsChanged(with: keyEvent(.flagsChanged, code: 59, flags: 0))
+    let chordRecorded = recorderReleased && recordedShortcut == .controlShiftD
+    recorder.keyDown(with: keyEvent(.keyDown, code: 0, flags: 0, text: "a"))
+    recorder.keyUp(with: keyEvent(.keyUp, code: 0, flags: 0, text: "a"))
+    let recorderEventsPassed = waitsForRelease && rightControlRecorded && leftControlRecorded && chordWaitsForRelease
+        && chordRecorded && recordedShortcut == nil && recorderReleased
+
     let recoveryWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
     let otherWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
     let escapeScopePassed = AppDelegate.canHideRecovery(for: recoveryWindow, recovery: recoveryWindow)
@@ -70,7 +118,7 @@ func nativeChecks(to output: URL) throws {
         && !AppDelegate.canHideRecovery(for: nil, recovery: recoveryWindow)
         && !AppDelegate.canHideRecovery(for: otherWindow, recovery: nil)
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
-    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed
+    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
     defer { board.releaseGlobally() }
     board.clearContents()
@@ -104,8 +152,11 @@ func nativeChecks(to output: URL) throws {
         "busyFeedbackCleared": busyFeedbackCleared,
         "practiceCloseRecheckPassed": practiceCloseRecheckPassed,
         "setupWithoutRecordingPassed": setupPassed, "recoveryEscapeScopePassed": escapeScopePassed,
+        "shortcutEditingWithoutRecordingPassed": shortcutEditingPassed, "microphoneSelectionWithoutRecordingPassed": microphoneSelectionPassed,
+        "modifierSideEventFlagsPassed": modifierSidePassed,
+        "syntheticShortcutRecorderEventsPassed": recorderEventsPassed,
         "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed,
-        "notTested": ["global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
+        "notTested": ["physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
     guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

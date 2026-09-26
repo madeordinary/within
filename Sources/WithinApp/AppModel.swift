@@ -36,7 +36,9 @@ final class AppModel: ObservableObject {
     @Published private(set) var isPracticeSession = false
     @Published var compatibilityPaste: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
     @Published var mode: ActivationMode { didSet { guard !previewMode else { return }; UserDefaults.standard.set(mode.rawValue, forKey: "activationMode") } }
-    @Published var alternateShortcut: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(alternateShortcut, forKey: "alternateShortcut"); registerShortcut() } }
+    @Published private(set) var dictationShortcut: DictationShortcut
+    @Published private(set) var editingShortcut = false
+    @Published private(set) var shortcutMessage = ""
     @Published var microphoneUID: String { didSet { guard !previewMode else { return }; UserDefaults.standard.set(microphoneUID, forKey: "microphoneUID") } }
     @Published private(set) var recoveryReason: RecoveryReason?
     @Published private(set) var recoveryDetail = ""
@@ -48,6 +50,8 @@ final class AppModel: ObservableObject {
     private let capture = CaptureEngine()
     private lazy var shortcut = ShortcutManager()
     private var gesture = ShortcutGesture()
+    private var shortcutActivationID: UUID?
+    private var shortcutRegistrationPending = false
     private var target: AccessibilityTarget?
     private var initialBlock: RecoveryReason?
     private var forcedRecovery: String?
@@ -76,8 +80,8 @@ final class AppModel: ObservableObject {
 
     var phase: DictationPhase { session.phase }
     var pendingText: String { session.transcript ?? "" }
-    var shortcutLabel: String { alternateShortcut ? "⌃ ⇧ D" : "⌃ ⇧ Space" }
-    var canStart: Bool { phase == .ready && !workerBusy && modelInstalled && modelVerified && !modelBusy && microphoneAllowed && selectedInputAvailable }
+    var shortcutLabel: String { dictationShortcut.displayName }
+    var canStart: Bool { !editingShortcut && phase == .ready && !workerBusy && modelInstalled && modelVerified && !modelBusy && microphoneAllowed && selectedInputAvailable }
     var selectedInputAvailable: Bool { microphoneUID.isEmpty ? !devices.isEmpty : devices.contains { $0.id == microphoneUID } }
     var selectedInputName: String {
         if microphoneUID.isEmpty { return devices.isEmpty ? "No microphone available" : "System default" }
@@ -100,21 +104,37 @@ final class AppModel: ObservableObject {
         soundsEnabled = UserDefaults.standard.bool(forKey: "soundsEnabled")
         compatibilityPaste = UserDefaults.standard.bool(forKey: "compatibilityPaste")
         mode = ActivationMode(rawValue: UserDefaults.standard.string(forKey: "activationMode") ?? "hold") ?? .hold
-        alternateShortcut = UserDefaults.standard.bool(forKey: "alternateShortcut")
+        dictationShortcut = .restored(from: UserDefaults.standard.data(forKey: "dictationShortcut"), legacyAlternate: UserDefaults.standard.bool(forKey: "alternateShortcut"))
         microphoneUID = UserDefaults.standard.string(forKey: "microphoneUID") ?? ""
         setupComplete = UserDefaults.standard.bool(forKey: "setupComplete")
         if preview { return }
+        shortcut.activationMode = { [weak self] in self?.mode ?? .hold }
         shortcut.onDown = { [weak self] in
-            guard let self else { return }
+            guard let self, !editingShortcut else { return }
             switch gesture.down(mode: mode, isActive: isActive) {
-            case .start: startFromCurrentWindow(fromShortcut: true)
-            case .stop: stop(cause: .togglePress)
+            case .start:
+                startFromCurrentWindow(fromShortcut: true)
+                shortcutActivationID = isActive ? session.id : nil
+            case .stop: shortcutActivationID = nil; stop(cause: .togglePress)
             case nil: break
             }
         }
         shortcut.onUp = { [weak self] in
             guard let self else { return }
             if gesture.up() == .stop { stop(cause: .hotKeyRelease) }
+            shortcutActivationID = nil
+            if shortcutRegistrationPending { registerShortcut() }
+        }
+        shortcut.onTap = { [weak self] in
+            guard let self, mode == .toggle, !editingShortcut else { return }
+            shortcut.onDown?(); shortcut.onUp?()
+        }
+        shortcut.onInterrupted = { [weak self] in
+            guard let self else { return }
+            if let shortcutActivationID, session.isCurrent(shortcutActivationID), isActive {
+                cancel(reason: "Shortcut changed to a key combination. Recording canceled.", cause: .shortcutInterrupted)
+            }
+            _ = gesture.up(); shortcutActivationID = nil
         }
         capture.onConfigurationChanged = { [weak self] in
             guard let self, phase == .recording else { return }
@@ -139,13 +159,55 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func registerShortcut() { guard !previewMode else { return }; shortcutAvailable = shortcut.register(alternate: alternateShortcut) }
+    func registerShortcut() {
+        guard !previewMode, !editingShortcut else { return }
+        shortcutAvailable = shortcut.register(dictationShortcut)
+        shortcutRegistrationPending = false
+    }
+    func beginShortcutEditing() -> Bool {
+        guard phase == .ready, !workerBusy, !editingShortcut else { return false }
+        editingShortcut = true; shortcutMessage = ""
+        if !previewMode { shortcut.unregisterDictation() }
+        gesture = ShortcutGesture(); shortcutActivationID = nil
+        notify(); return true
+    }
+    func endShortcutEditing() {
+        guard editingShortcut else { return }
+        editingShortcut = false; registerShortcut(); notify()
+    }
+    @discardableResult func chooseShortcut(_ candidate: DictationShortcut) -> Bool {
+        guard phase == .ready, !workerBusy else {
+            shortcutMessage = "Wait for the current work to finish, then try again."; notify(); return false
+        }
+        guard candidate.isValid else {
+            shortcutMessage = "That key is used for typing or system commands. Choose another shortcut."; notify(); return false
+        }
+        let registered = previewMode || shortcut.register(candidate)
+        if !registered && !(candidate.isModifierOnly && !accessibilityAllowed) {
+            shortcutMessage = "That shortcut is unavailable. Try a different combination."
+            if editingShortcut { shortcut.unregisterDictation() } else { registerShortcut() }
+            notify(); return false
+        }
+        dictationShortcut = candidate; shortcutAvailable = registered; shortcutMessage = ""
+        if !previewMode {
+            UserDefaults.standard.set(try? JSONEncoder().encode(candidate), forKey: "dictationShortcut")
+            if editingShortcut { shortcut.unregisterDictation() }
+        }
+        notify(); return true
+    }
     func refreshPermissions() {
+        refreshPermissions(mayRegisterShortcut: true)
+    }
+    private func refreshPermissions(mayRegisterShortcut: Bool) {
         guard !previewMode else { return }
         microphoneAllowed = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+        let accessibilityChanged = accessibilityAllowed != AXIsProcessTrusted()
         accessibilityAllowed = AXIsProcessTrusted()
         loginEnabled = SMAppService.mainApp.status == .enabled
         devices = CaptureEngine.devices()
+        if accessibilityChanged && dictationShortcut.isModifierOnly { shortcutRegistrationPending = true }
+        // A press callback must retain its release handler if permissions changed.
+        if shortcutRegistrationPending && mayRegisterShortcut && !shortcut.isHeld(dictationShortcut) { registerShortcut() }
         notify()
     }
     func requestMicrophone() {
@@ -211,7 +273,8 @@ final class AppModel: ObservableObject {
         start(practice: startsInPractice, fromShortcut: fromShortcut)
     }
     func start(practice: Bool, fromShortcut: Bool = false) {
-        refreshPermissions()
+        guard !editingShortcut else { return }
+        refreshPermissions(mayRegisterShortcut: !fromShortcut)
         guard canStart else {
             if phase == .recovery { showRecovery?() }
             else if phase != .ready { announce(message) }
@@ -327,8 +390,8 @@ final class AppModel: ObservableObject {
                 if !audioFlowing, ring.samplesCaptured > 0 { audioFlowing = true; message = "Listening"; announce("Recording started"); playCue(start: true) }
                 if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) { cancel(reason: "No audio arrived from the microphone. Check the selected input and try again.", cause: .noAudio); return }
                 if fromHoldShortcut {
-                    let chord = shortcut.chordState(alternate: alternateShortcut)
-                    if gesture.poll(chordHeld: chord.isHeld) == .stop {
+                    let chord = shortcut.chordState(dictationShortcut)
+                    if gesture.poll(chordHeld: shortcut.isHeld(dictationShortcut)) == .stop {
                         stop(cause: .holdWatchdog, hardwareChord: chord); return
                     }
                 }
@@ -363,8 +426,8 @@ final class AppModel: ObservableObject {
     private func recordStop(_ cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
         guard isActive || phase == .transcribing, stopDiagnostics.lastStop == nil else { return }
         stopDiagnostics.record(RecordingStopDiagnostic(cause: cause, phase: phase,
-            hardwareChord: hardwareChord ?? shortcut.chordState(alternate: alternateShortcut),
-            sessionChord: shortcut.chordState(alternate: alternateShortcut, source: .combinedSessionState),
+            hardwareChord: hardwareChord ?? shortcut.chordState(dictationShortcut),
+            sessionChord: shortcut.chordState(dictationShortcut, source: .combinedSessionState),
             eventListeningAllowed: CGPreflightListenEventAccess(),
             audioConfiguration: capture.lastConfigurationChange))
     }
@@ -520,8 +583,9 @@ final class AppModel: ObservableObject {
     func configurePreview(_ state: String) {
         guard previewMode else { return }
         modelBusy = false; workerBusy = false
-        mode = .toggle; alternateShortcut = true; microphoneUID = "preview-input"
-        devices = [MicrophoneDevice(id: "preview-input", objectID: 0, name: "Built-in Microphone")]
+        mode = .toggle; dictationShortcut = .controlShiftD; microphoneUID = "preview-input"
+        devices = [MicrophoneDevice(id: "preview-input", objectID: 0, name: "Built-in Microphone"),
+                   MicrophoneDevice(id: "preview-external", objectID: 1, name: "USB Microphone")]
         modelInstalled = state != "setup"; microphoneAllowed = state != "setup"; accessibilityAllowed = state != "setup"
         modelVerified = modelInstalled && state != "model-error"
         if state == "setup" { setupComplete = false }
