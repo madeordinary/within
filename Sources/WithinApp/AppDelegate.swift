@@ -154,8 +154,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func present(_ window: NSWindow?) {
         model.refreshPermissions()
-        if window?.isMiniaturized == true { window?.deminiaturize(nil) }
-        NSApp.activate(ignoringOtherApps: true); window?.makeKeyAndOrderFront(nil)
+        let destination = Self.presentationWindow(requested: window, windows: NSApp.orderedWindows)
+        let parent = destination?.sheetParent ?? destination
+        if parent?.isMiniaturized == true { parent?.deminiaturize(nil) }
+        NSApp.activate(ignoringOtherApps: true)
+        parent?.orderFront(nil)
+        destination?.makeKeyAndOrderFront(nil)
+    }
+    /// Reopening the app must not put Home in front of an unfinished sheet.
+    /// In particular, shortcut editing intentionally pauses every dictation path.
+    static func presentationWindow(requested: NSWindow?, windows: [NSWindow]) -> NSWindow? {
+        guard let owner = windows.first(where: { $0.attachedSheet != nil }) else { return requested }
+        var destination = owner
+        while let sheet = destination.attachedSheet { destination = sheet }
+        return destination
     }
     private func showMainWindow() {
         guard model != nil else { return }

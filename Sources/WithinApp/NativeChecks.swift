@@ -111,6 +111,18 @@ func nativeChecks(to output: URL) throws {
     let recorderEventsPassed = waitsForRelease && rightControlRecorded && leftControlRecorded && chordWaitsForRelease
         && chordRecorded && recordedShortcut == nil && recorderReleased
 
+    let home = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+    let settings = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+    let shortcutSheet = NSWindow(contentRect: .zero, styleMask: [.titled], backing: .buffered, defer: false)
+    let homeWithoutSheet = AppDelegate.presentationWindow(requested: home, windows: [home, settings]) === home
+    settings.beginSheet(shortcutSheet)
+    let reopenedToSheet = AppDelegate.presentationWindow(requested: home, windows: [home, settings, shortcutSheet]) === shortcutSheet
+    let settingsKeepsSheet = AppDelegate.presentationWindow(requested: settings, windows: [home, settings, shortcutSheet]) === shortcutSheet
+    settings.endSheet(shortcutSheet); shortcutSheet.orderOut(nil)
+    let homeAfterSheet = AppDelegate.presentationWindow(requested: home, windows: [home, settings]) === home
+    home.orderOut(nil); settings.orderOut(nil)
+    let sheetRoutingPassed = homeWithoutSheet && reopenedToSheet && settingsKeepsSheet && homeAfterSheet
+
     let recoveryWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
     let otherWindow = NSWindow(contentRect: .zero, styleMask: [], backing: .buffered, defer: false)
     let escapeScopePassed = AppDelegate.canHideRecovery(for: recoveryWindow, recovery: recoveryWindow)
@@ -118,7 +130,7 @@ func nativeChecks(to output: URL) throws {
         && !AppDelegate.canHideRecovery(for: nil, recovery: recoveryWindow)
         && !AppDelegate.canHideRecovery(for: otherWindow, recovery: nil)
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
-    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed
+    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
     defer { board.releaseGlobally() }
     board.clearContents()
@@ -155,6 +167,7 @@ func nativeChecks(to output: URL) throws {
         "shortcutEditingWithoutRecordingPassed": shortcutEditingPassed, "microphoneSelectionWithoutRecordingPassed": microphoneSelectionPassed,
         "modifierSideEventFlagsPassed": modifierSidePassed,
         "syntheticShortcutRecorderEventsPassed": recorderEventsPassed,
+        "reopenAndNavigationPreserveSheetPassed": sheetRoutingPassed,
         "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed,
         "notTested": ["physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)

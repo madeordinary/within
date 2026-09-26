@@ -12,6 +12,7 @@ struct MainView: View {
         case .transcribing: return "Finishing your words"
         case .recovery: return "Your words are waiting"
         case .ready:
+            if model.editingShortcut { return "Finish choosing your shortcut" }
             if needsSetup { return "Make yourself at home" }
             if !model.selectedInputAvailable { return "Your microphone is unavailable" }
             if model.modelBusy || model.workerBusy { return "Preparing local speech" }
@@ -27,10 +28,13 @@ struct MainView: View {
                     Brand().padding(.bottom, 6)
                     VStack(alignment: .leading, spacing: 9) {
                         Text(title).font(.system(size: 26, weight: .semibold)).tracking(-0.5)
-                        Text(needsSetup ? "A few choices, then a little more room to think." : "Choose a text field in another app. Your words will follow.")
+                        Text(model.editingShortcut ? "Dictation is paused while the shortcut dialog is open." : needsSetup ? "A few choices, then a little more room to think." : "Choose a text field in another app. Your words will follow.")
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
                     SessionStatusView(model: model)
+                    if model.editingShortcut {
+                        Button("Return to shortcut setup") { model.showSettings?() }.primaryAction()
+                    }
                     if model.modelInstalled && !model.modelBusy && !model.modelVerified {
                         ModelPanel(model: model).withinSurface()
                     }
