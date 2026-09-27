@@ -24,6 +24,7 @@ Package.swift
 Patches/fluidaudio-privacy-and-bounded-ingress.patch
 README.md
 Sources/WithinApp/AccessibilityTarget.swift
+Sources/WithinApp/AppAudioTap.swift
 Sources/WithinApp/AppDelegate.swift
 Sources/WithinApp/AppModel.swift
 Sources/WithinApp/DesignSystem.swift
@@ -54,6 +55,7 @@ Sources/WithinCore/ClipboardLease.swift
 Sources/WithinCore/Diagnostics.swift
 Sources/WithinCore/DictationHistory.swift
 Sources/WithinCore/InsertionTrial.swift
+Sources/WithinCore/Meetings.swift
 Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
 Sources/WithinCore/Notes.swift
@@ -66,6 +68,7 @@ Tests/WithinCoreTests/ClipboardLeaseTests.swift
 Tests/WithinCoreTests/DictationHistoryTests.swift
 Tests/WithinCoreTests/InsertionTrialTests.swift
 Tests/WithinCoreTests/IntegrityTests.swift
+Tests/WithinCoreTests/MeetingsTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift
 Tests/WithinCoreTests/NotesTests.swift
 Tests/WithinCoreTests/ShortcutTests.swift

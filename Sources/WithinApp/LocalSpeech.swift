@@ -7,6 +7,12 @@ actor LocalSpeech {
     private var models: AsrModels?
     private var loadedDirectory: URL?
     private var stream: SlidingWindowAsrManager?
+    /// Named sessions for longer modes (a meeting's "you" and "others"). Dictation uses `stream` only.
+    private var namedStreams: [String: SlidingWindowAsrManager] = [:]
+    /// Named sessions share one set of loaded models. Running two sessions' windows at the
+    /// same moment lost most of one transcript in the Sep 27 fixture, so model work takes turns.
+    private var modelWorkBusy = false
+    private var modelWorkWaiters: [CheckedContinuation<Void, Never>] = []
     private var verification = ModelVerificationCache()
     private var loadedManifest: ModelManifest?
     private var verificationTask: Task<Void, Never>?
@@ -20,7 +26,7 @@ actor LocalSpeech {
     }
 
     func prepare(directory: URL, manifest: ModelManifest) async throws {
-        guard stream == nil, !startingSession else { throw SpeechFailure.busy }
+        guard stream == nil, namedStreams.isEmpty, !startingSession else { throw SpeechFailure.busy }
         do {
             try verification.verify(manifest, at: directory, force: models == nil)
             if models == nil || loadedDirectory != directory || loadedManifest != manifest {
@@ -48,7 +54,7 @@ actor LocalSpeech {
         }
     }
     private func reverifyIfIdle() async {
-        guard stream == nil, !startingSession, models != nil,
+        guard stream == nil, namedStreams.isEmpty, !startingSession, models != nil,
               let directory = loadedDirectory, let manifest = loadedManifest else { return }
         do { try verification.verify(manifest, at: directory, force: true) }
         catch {
@@ -121,10 +127,78 @@ actor LocalSpeech {
         await stream?.cleanup()
         stream = nil
     }
+
+    // MARK: Named sessions (meetings). Same bounded serial ingress as `consume`, kept separate
+    // so the dictation path above is unchanged.
+
+    /// `dedicatedModels` loads a second copy from the same verified directory: two sessions
+    /// sharing one model instance lost words in the Sep 27 two-stream fixture.
+    func beginStream(_ key: String, dedicatedModels: Bool = false) async throws {
+        guard let models, let directory = loadedDirectory else { throw SpeechFailure.notReady }
+        guard namedStreams[key] == nil, !startingSession else { throw SpeechFailure.busy }
+        startingSession = true
+        defer { startingSession = false }
+        let sessionModels = dedicatedModels ? try AsrModels.loadLocal(from: directory, version: .v3, encoderPrecision: .int8V2) : models
+        let next = SlidingWindowAsrManager(config: .default)
+        try await next.loadModels(sessionModels)
+        try await next.withinBegin()
+        namedStreams[key] = next
+    }
+
+    func consumeStream(_ key: String, ring: AudioRing, sampleRate: Double, updateInterval: Duration = .milliseconds(500),
+                       onUpdate: (@Sendable (_ confirmed: String, _ volatile: String) -> Void)? = nil) async throws -> String {
+        guard let named = namedStreams[key] else { throw SpeechFailure.notReady }
+        let converter = AudioConverter()
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false) else { throw SpeechFailure.format }
+        let clock = ContinuousClock()
+        var lastUpdate = clock.now
+        do {
+            while ring.status == 0 || ring.pending > 0 {
+                try Task.checkCancellation()
+                let samples = ring.drain(upTo: max(1, Int(sampleRate / 10)))
+                if samples.isEmpty { try await Task.sleep(for: .milliseconds(15)); continue }
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(samples.count)) else { throw SpeechFailure.format }
+                buffer.frameLength = AVAudioFrameCount(samples.count)
+                samples.withUnsafeBufferPointer { input in
+                    buffer.floatChannelData![0].update(from: input.baseAddress!, count: samples.count)
+                }
+                let resampled = try converter.resampleBuffer(buffer)
+                try await takingTurns { try await named.withinAppendSamples(resampled) }
+                if let onUpdate, lastUpdate.duration(to: clock.now) >= updateInterval {
+                    lastUpdate = clock.now
+                    onUpdate(await named.confirmedTranscript, await named.volatileTranscript)
+                }
+            }
+            let text = try await takingTurns { try await named.withinFinish() }
+            await named.cleanup()
+            namedStreams[key] = nil
+            try Task.checkCancellation()
+            return ring.meanEnergy < 0.0000002 ? "" : TranscriptFormatting.clean(text)
+        } catch {
+            let canceled = error is CancellationError || Task.isCancelled
+            let partial = canceled ? "" : TranscriptFormatting.clean([await named.confirmedTranscript, await named.volatileTranscript].filter { !$0.isEmpty }.joined(separator: " "))
+            await named.cleanup()
+            namedStreams[key] = nil
+            if !partial.isEmpty { throw SpeechFailure.partial(partial) }
+            throw error
+        }
+    }
+
+    private func takingTurns<T>(_ work: () async throws -> T) async throws -> T {
+        if modelWorkBusy { await withCheckedContinuation { modelWorkWaiters.append($0) } } else { modelWorkBusy = true }
+        defer { if modelWorkWaiters.isEmpty { modelWorkBusy = false } else { modelWorkWaiters.removeFirst().resume() } }
+        return try await work()
+    }
+
+    func cancelStream(_ key: String) async {
+        await namedStreams[key]?.cleanup()
+        namedStreams[key] = nil
+    }
     func unload() async {
         verificationTask?.cancel(); verificationTask = nil
         verification.invalidate(); loadedManifest = nil
         await cancel()
+        for key in namedStreams.keys { await cancelStream(key) }
         models = nil; loadedDirectory = nil
     }
 

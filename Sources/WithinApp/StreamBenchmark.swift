@@ -254,9 +254,11 @@ func audioProcessList() {
 /// heard), and transcribes the tapped audio locally. Measures app-audio capture quality.
 @available(macOS 14.2, *)
 func appAudioTapFixture() async {
-    guard CommandLine.arguments.count == 6, let seconds = Double(CommandLine.arguments[4]) else {
-        print("Usage: Within --app-audio-tap-fixture model-directory fixture-audio seconds output-json"); exit(2)
+    guard CommandLine.arguments.count >= 6, let seconds = Double(CommandLine.arguments[4]) else {
+        print("Usage: Within --app-audio-tap-fixture model-directory fixture-audio seconds output-json [muted|mutedWhenTapped]"); exit(2)
     }
+    // Fixture-only muting keeps the test silent. Real meetings must tap unmuted so the call stays audible.
+    let alwaysMuted = CommandLine.arguments.count == 7 && CommandLine.arguments[6] == "muted"
     var report: [String: Any] = ["fixtureOnly": true, "tappedProcess": "afplay", "muted": true]
     let output = URL(fileURLWithPath: CommandLine.arguments[5])
     func finish(_ code: Int32) -> Never {
@@ -298,7 +300,8 @@ func appAudioTapFixture() async {
         let description = CATapDescription(stereoMixdownOfProcesses: [processObject])
         report["defaultTapUUIDWasZero"] = description.uuid.uuidString == "00000000-0000-0000-0000-000000000000"
         description.uuid = UUID()
-        description.muteBehavior = .mutedWhenTapped
+        description.muteBehavior = alwaysMuted ? .muted : .mutedWhenTapped
+        report["muteBehavior"] = alwaysMuted ? "muted" : "mutedWhenTapped"
         description.isPrivate = true
         var tap = AudioObjectID(kAudioObjectUnknown)
         let tapStatus = AudioHardwareCreateProcessTap(description, &tap)
@@ -377,5 +380,101 @@ func appAudioTapFixture() async {
     } catch {
         report["error"] = "\(type(of: error))"
         print("App-audio tap fixture failed."); finish(1)
+    }
+}
+
+/// Lock-protected builder shared by both stream callbacks in the fixture.
+private final class SharedTranscript: @unchecked Sendable {
+    private let lock = NSLock()
+    private var builder = MeetingTranscriptBuilder()
+    func update(_ source: MeetingSource, _ text: String, at offset: Double) { lock.lock(); builder.update(source, transcript: text, at: offset); lock.unlock() }
+    var segments: [MeetingSegment] { lock.lock(); defer { lock.unlock() }; return builder.segments }
+}
+
+/// Developer-only: "Others" through a muted per-app tap of afplay and "You" from a second
+/// real-time fixture ring, transcribed concurrently and merged into labelled turns.
+@available(macOS 14.2, *)
+func twoStreamMeetingFixture() async {
+    guard CommandLine.arguments.count == 6, let seconds = Double(CommandLine.arguments[4]) else {
+        print("Usage: Within --two-stream-meeting-fixture model-directory fixture-audio seconds output-json"); exit(2)
+    }
+    var report: [String: Any] = ["fixtureOnly": true, "othersVia": "muted per-app tap of afplay", "youVia": "real-time fixture ring (no microphone)"]
+    let output = URL(fileURLWithPath: CommandLine.arguments[5])
+    func finish(_ code: Int32) -> Never {
+        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+    }
+    do {
+        URLProtocol.registerClass(OfflineProbe.self)
+        let (all, rate) = try loadFixture(CommandLine.arguments[3])
+        let count = Int(seconds * rate)
+        let others = [Float](repeating: 0, count: Int(rate * 2)) + Array(all.prefix(count))
+        let you = Array(all.dropFirst(Int(150 * rate)).prefix(count))
+        let wav = FileManager.default.temporaryDirectory.appendingPathComponent("within-two-stream-\(UUID().uuidString).caf")
+        defer { try? FileManager.default.removeItem(at: wav) }
+        guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: rate, channels: 1, interleaved: false),
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(others.count)) else { throw SpeechFailure.format }
+        buffer.frameLength = AVAudioFrameCount(others.count)
+        others.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: others.count) }
+        try AVAudioFile(forWriting: wav, settings: format.settings).write(from: buffer)
+
+        let speech = LocalSpeech()
+        let baseline = physicalFootprintMB()
+        try await speech.prepare(directory: URL(fileURLWithPath: CommandLine.arguments[2]), manifest: try loadManifest())
+        try await speech.beginStream("you")
+        try await speech.beginStream("others", dedicatedModels: true)
+        report["afterModelAndTwoSessionsFootprintMB"] = physicalFootprintMB(); report["baselineFootprintMB"] = baseline
+
+        let player = Process()
+        player.executableURL = URL(fileURLWithPath: "/usr/bin/afplay"); player.arguments = [wav.path]
+        try player.run()
+        var object: AudioObjectID?
+        for _ in 0..<60 where object == nil {
+            object = AppAudioTap.processObject(pid: player.processIdentifier)
+            if object == nil { try await Task.sleep(for: .milliseconds(25)) }
+        }
+        guard let object else { player.terminate(); report["error"] = "no process object"; finish(1) }
+        let tap = AppAudioTap()
+        let othersRing = try tap.start(processes: [object], mute: .mutedWhenTapped, limits: .note)
+        let youRing = AudioRing(capacity: Int(rate * 20), sampleLimit: UInt64(Double(count) + rate))
+        let shared = SharedTranscript()
+        let clock = ContinuousClock()
+        let start = clock.now
+        @Sendable func offset() -> Double { let c = start.duration(to: ContinuousClock.now).components; return Double(c.seconds) + Double(c.attoseconds) / 1e18 }
+        let tapRate = tap.sampleRate
+        let othersTask = Task { try await speech.consumeStream("others", ring: othersRing, sampleRate: tapRate) { confirmed, _ in shared.update(.others, confirmed, at: offset()) } }
+        let youTask = Task { try await speech.consumeStream("you", ring: youRing, sampleRate: rate) { confirmed, _ in shared.update(.you, confirmed, at: offset()) } }
+        var memory: [Double] = []
+        let block = Int(rate / 10)
+        try await clock.sleep(until: start.advanced(by: .seconds(2)))
+        for position in stride(from: 0, to: you.count, by: block) {
+            let n = min(block, you.count - position)
+            let status = you.withUnsafeBufferPointer { youRing.push($0.baseAddress!.advanced(by: position), count: n) }
+            if status != 0 { break }
+            if position % Int(rate * 5) < block { memory.append(physicalFootprintMB()) }
+            try await clock.sleep(until: start.advanced(by: .seconds(2 + Double(position + n) / rate)))
+        }
+        youRing.close()
+        while player.isRunning { try await Task.sleep(for: .milliseconds(100)) }
+        try await Task.sleep(for: .milliseconds(500))
+        let othersStatus = othersRing.status
+        tap.stop()
+        let closed = offset()
+        let youText = try await youTask.value
+        let othersText = try await othersTask.value
+        shared.update(.you, youText, at: offset()); shared.update(.others, othersText, at: offset())
+        await speech.unload()
+        let segments = shared.segments
+        report["youTranscript"] = youText; report["othersTranscript"] = othersText
+        report["youRingFinalStatus"] = youRing.status; report["othersRingStatusBeforeStop"] = othersStatus
+        report["othersCapturedSeconds"] = Double(othersRing.samplesCaptured) / tapRate
+        report["finalFlushSeconds"] = offset() - closed
+        report["footprintMBEvery5s"] = memory
+        report["segments"] = segments.count
+        report["segmentSources"] = segments.map { $0.source.rawValue }.joined(separator: ",")
+        report["segmentOffsetsAscending"] = zip(segments, segments.dropFirst()).allSatisfy { $0.offset <= $1.offset }
+        report["interceptedNetworkRequests"] = OfflineProbe.requestCount
+        print("Two-stream meeting fixture completed. No microphone was opened."); finish(0)
+    } catch {
+        report["error"] = "\(type(of: error))"; print("Two-stream meeting fixture failed."); finish(1)
     }
 }
