@@ -6,7 +6,7 @@ import WithinCore
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -188,6 +188,30 @@ func nativeChecks(to output: URL) throws {
     }
     recoveryNavigation.recoveryDismissed()
     recoveryNavigationPassed = recoveryNavigation.page == .home && pending.pendingText == pendingWords && recoveryNavigationPassed
+    // Optional history storage, exercised only in a temporary folder with synthetic text.
+    let historyFolder = FileManager.default.temporaryDirectory.appendingPathComponent("Within.HistoryFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: historyFolder) }
+    let historyStore = HistoryStore(directory: historyFolder)
+    let historyFile = historyFolder.appendingPathComponent("dictation-history.json")
+    let sample = HistoryPolicy.adding("synthetic history words", at: Date(), to: [], retention: .week)
+    try historyStore.save(sample)
+    let fileMode = (try FileManager.default.attributesOfItem(atPath: historyFile.path)[.posixPermissions] as? NSNumber)?.intValue
+    let folderMode = (try FileManager.default.attributesOfItem(atPath: historyFolder.path)[.posixPermissions] as? NSNumber)?.intValue
+    let excludedFromBackup = try historyFolder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup == true
+    let reloaded = try historyStore.load() == sample
+    let noStagingLeft = try FileManager.default.contentsOfDirectory(atPath: historyFolder.path) == ["dictation-history.json"]
+    try historyStore.save([])
+    let historyStorePassed = fileMode == 0o600 && folderMode == 0o700 && excludedFromBackup && reloaded && noStagingLeft
+        && !FileManager.default.fileExists(atPath: historyFile.path)
+    // Previews never save history; choosing Off clears the in-memory list, shorter retention prunes it.
+    let historyPreview = fixture("history")
+    let fixtureCount = historyPreview.history.count
+    historyPreview.chooseHistoryRetention(.day)
+    let prunedToDay = historyPreview.history.count < fixtureCount && !historyPreview.history.isEmpty
+    historyPreview.chooseHistoryRetention(.off)
+    let unchosen = fixture("ready")
+    let historyPolicyPassed = prunedToDay && historyPreview.history.isEmpty && unchosen.historyRetention == nil
+        && unchosen.privacySummary.contains("No recordings or dictation history saved")
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
@@ -230,8 +254,10 @@ func nativeChecks(to output: URL) throws {
         "singleWindowNavigationWithoutRecordingPassed": navigationPassed,
         "practiceExitConfirmationAndRacesPassed": practiceNavigationPassed,
         "navigationPreservesPendingWordsPassed": recoveryNavigationPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed,
-        "notTested": ["physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
+        "historyStoreOwnerOnlyBackupExcludedPassed": historyStorePassed,
+        "historyRetentionPreviewPassed": historyPolicyPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed,
+        "notTested": ["live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

@@ -8,11 +8,19 @@ Within transcribes on this Mac. The engineering preview has no account, telemetr
 
 Microphone permission is requested from the Allow button. Permission and model preparation do not start recording. A shortcut, menu action, or Start practice action starts capture, with a visible recording state. Stop, Cancel, session limits, errors, and lifecycle interruptions stop capture. Live system-indicator and interruption behavior remains a [validation requirement](VALIDATION.md).
 
-The app does not write audio or transcripts to disk. Audio passes through a bounded ring and rolling inference windows. Consumed ring storage is overwritten. Frameworks and macOS can retain copies; this is not a guarantee of memory erasure or protection against a compromised operating system.
+The app does not write audio to disk. Transcripts are written only to the optional dictation history described below. Audio passes through a bounded ring and rolling inference windows. Consumed ring storage is overwritten. Frameworks and macOS can retain copies; this is not a guarantee of memory erasure or protection against a compromised operating system.
 
 After recording, the app may retain the stopped audio-engine object for the same selected microphone. It stops the audio hardware and removes the tap. Buffered audio can finish transcription before it is released; the stopped engine retains no recording buffer and does not keep the microphone running between sessions.
 
-Pending words remain in memory for insertion or recovery. Practice text remains in its visible field until Clear or app exit. Lock/sleep cancels active capture; already-recovered words remain pending and their window is hidden. There is no transcript-history database. Model state may remain loaded until memory pressure, lock/sleep, removal, or quit.
+Pending words remain in memory for insertion or recovery. Practice text remains in its visible field until Clear or app exit. Lock/sleep cancels active capture; already-recovered words remain pending and their window is hidden. Model state may remain loaded until memory pressure, lock/sleep, removal, or quit.
+
+## Optional dictation history
+
+History is off until you choose it in setup, in the Dictation space, or in Settings → History. Retention can be 24 hours, 7 days, 30 days, or until you delete it; Off stops saving. Shortening retention or turning history off asks before deleting older entries. Upgrading never starts saving without that choice.
+
+Only final text and its time are saved, after a confirmed insertion, a confirmed return-and-insert from recovery, or an explicit Copy from recovery. Practice, canceled, and discarded words are never saved. No audio, destination app, window title, or field content is stored. Entries are pruned on launch, when saving, and hourly.
+
+History is one file, `~/Library/Application Support/Within/History/dictation-history.json`, readable only by your macOS account (folder 0700, file 0600) and replaced atomically. The folder is excluded from Time Machine backups. Nothing is synced or uploaded. Copying an entry uses the clipboard with the same caveats as recovery Copy. Deleting an entry or clearing history rewrites or removes the file; on APFS and SSD storage that is not a secure erase. If FileVault is on, it protects the file while the Mac is shut down; it does not hide the file from apps running under your account. History content and counts never appear in diagnostics.
 
 ## Insertion and clipboard
 
@@ -31,7 +39,8 @@ App-managed storage consists of:
 - Public model files in `~/Library/Application Support/Within/Models/`.
 - Temporary staging in `~/Library/Application Support/Within/Model Downloads/`.
 - An empty single-instance lock in the same application-support folder.
-- Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection; no dictation content.
+- Optional dictation history in `~/Library/Application Support/Within/History/`, only after you choose to keep it.
+- Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection and history retention; no dictation content.
 
 Core ML may also create OS-managed compiled-model caches. Microphone permission is required for recording. Accessibility is optional for practice/Copy and required for insertion and global modifier-only shortcuts. Start at login is an explicit Settings choice. The preview is a single process with Hardened Runtime and an audio-input entitlement; App Sandbox compatibility and trusted public signing remain release gates.
 
@@ -43,4 +52,4 @@ App-controlled production logging does not serialize audio or transcripts, and t
 
 The diagnostic preview includes the latest session's startup durations, trigger category, and whether it used Practice. These measurements stay in memory unless you explicitly save the report; they contain no audio, text, wall-clock timestamps, or destination/device identities.
 
-To remove the model, use Settings → Remove model. To uninstall, quit and delete Within, optionally remove its application-support folder and preference domain, disable Start at login, and revoke Microphone and Accessibility permissions in System Settings.
+To remove the model, use Settings → Remove model. To delete saved dictations, use Settings → History → Clear history. To uninstall, quit and delete Within, optionally remove its application-support folder and preference domain, disable Start at login, and revoke Microphone and Accessibility permissions in System Settings.

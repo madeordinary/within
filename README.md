@@ -14,7 +14,7 @@ Native macOS dictation with on-device transcription and explicit control over re
 - A separately downloaded Parakeet model transcribes locally.
 - Direct insertion uses Accessibility and rechecks the original destination.
 - Uncertain insertion keeps words available for review, explicit Copy, or Discard.
-- No account, telemetry, cloud transcription, or transcript history.
+- No account, telemetry, or cloud transcription. Dictation history is off until you choose it, and then stays on this Mac for as long as you pick.
 
 See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
 

@@ -48,6 +48,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var recoveryReason: RecoveryReason?
     @Published private(set) var recoveryDetail = ""
     @Published private(set) var returning = false
+    /// Optional local dictation history. `nil` retention means the user has not chosen; nothing is saved.
+    @Published private(set) var history: [HistoryEntry] = []
+    @Published private(set) var historyRetention: HistoryRetention?
+    @Published private(set) var historyMessage = ""
 
     let manifest: ModelManifest
     let store: ModelStore
@@ -71,11 +75,14 @@ final class AppModel: ObservableObject {
     private var pasteChosenForSession = false
     private var fromHoldShortcut = false
     private let previewMode: Bool
+    private var historyStore: HistoryStore?
+    private var historyTimer: Timer?
     var stateChanged: (() -> Void)?
     var showMain: (() -> Void)?
     var showSettings: (() -> Void)?
     var showAudioSettings: (() -> Void)?
     var showModelSettings: (() -> Void)?
+    var showHistorySettings: (() -> Void)?
     var showHelp: (() -> Void)?
     var showSetup: (() -> Void)?
     var showPractice: (() -> Void)?
@@ -97,6 +104,14 @@ final class AppModel: ObservableObject {
     var isActive: Bool { phase == .preparing || phase == .recording }
     var hasActivePracticeSession: Bool { isPracticeSession && (isActive || phase == .transcribing) }
     var startsInPractice: Bool { practiceAreaIsActive?() == true }
+    var effectiveRetention: HistoryRetention { historyRetention ?? .off }
+    var privacySummary: String {
+        switch effectiveRetention {
+        case .off: return "On your Mac. No recordings or dictation history saved."
+        case .forever: return "On your Mac. No recordings saved. Dictation history kept until you delete it."
+        default: return "On your Mac. No recordings saved. Dictation history kept \(effectiveRetention.title)."
+        }
+    }
     func shouldCancelPracticeOnClose(sessionID: UUID?) -> Bool {
         guard let sessionID else { return false }
         return hasActivePracticeSession && session.isCurrent(sessionID)
@@ -112,7 +127,13 @@ final class AppModel: ObservableObject {
         dictationShortcut = .restored(from: UserDefaults.standard.data(forKey: "dictationShortcut"), legacyAlternate: UserDefaults.standard.bool(forKey: "alternateShortcut"))
         microphoneUID = UserDefaults.standard.string(forKey: "microphoneUID") ?? ""
         setupComplete = UserDefaults.standard.bool(forKey: "setupComplete")
+        historyRetention = .restored(from: UserDefaults.standard.string(forKey: "historyRetention"))
         if preview { return }
+        historyStore = HistoryStore(directory: base.appendingPathComponent("History", isDirectory: true))
+        loadHistory()
+        historyTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.pruneHistory() }
+        }
         shortcut.activationMode = { [weak self] in self?.mode ?? .hold }
         shortcut.onDown = { [weak self] in
             guard let self, !editingShortcut else { return }
@@ -469,6 +490,7 @@ final class AppModel: ObservableObject {
         } else if target == nil { trial.recover(.targetUnavailable) }
         if trial.phase == .inserted {
             session.finish(id); releaseTarget(); message = "Inserted. Microphone off."; announce("Dictation inserted")
+            recordHistory(text, practice: isPracticeSession)
         } else {
             suspendEscapeShortcut()
             _ = session.recover(text, id: id)
@@ -493,7 +515,11 @@ final class AppModel: ObservableObject {
                 trial.completeWrite(confirmed: target.replaceSelection(with: pendingText))
             } else { trial.recover(.targetUnavailable) }
             returning = false
-            if trial.phase == .inserted { discard(); message = "Inserted into the original field."; announce(message) }
+            if trial.phase == .inserted {
+                let words = pendingText
+                discard(); message = "Inserted into the original field."; announce(message)
+                recordHistory(words, practice: isPracticeSession)
+            }
             else {
                 if case .recovery(let reason) = trial.phase { recoveryReason = reason; recoveryDetail = reason.explanation }
                 showRecovery?()
@@ -504,7 +530,11 @@ final class AppModel: ObservableObject {
         guard phase == .recovery, !workerBusy, !returning, !pendingText.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
-        if pasteboard.setString(pendingText, forType: .string) { discard(); message = "Copied. Your clipboard may sync through macOS."; announce("Copied to clipboard") }
+        let words = pendingText
+        if pasteboard.setString(words, forType: .string) {
+            discard(); message = "Copied. Your clipboard may sync through macOS."; announce("Copied to clipboard")
+            recordHistory(words, practice: isPracticeSession)
+        }
         else { recoveryDetail = "Copy failed. Your words are still here." }
     }
     func discard() {
@@ -513,6 +543,48 @@ final class AppModel: ObservableObject {
         dismissRecovery?(); message = "Ready when you are."; notify()
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
+
+    func chooseHistoryRetention(_ retention: HistoryRetention) {
+        historyRetention = retention
+        if !previewMode { UserDefaults.standard.set(retention.rawValue, forKey: "historyRetention") }
+        pruneHistory()
+    }
+    func pruneHistory() {
+        guard let retention = historyRetention else { return }
+        let pruned = HistoryPolicy.prune(history, now: Date(), retention: retention)
+        guard pruned != history else { return }
+        history = pruned; persistHistory()
+    }
+    func deleteHistoryEntry(_ id: UUID) {
+        history.removeAll { $0.id == id }; persistHistory(); announce("Dictation deleted from history")
+    }
+    func clearHistory() { history = []; persistHistory(); announce("History cleared") }
+    func copyHistoryEntry(_ entry: HistoryEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        historyMessage = pasteboard.setString(entry.text, forType: .string) ? "Copied. Your clipboard may sync through macOS." : "Copy failed."
+        announce(historyMessage)
+    }
+    private func loadHistory() {
+        // Without an explicit choice, the history file is neither read nor changed.
+        guard let historyStore, let retention = historyRetention else { return }
+        do {
+            let stored = try historyStore.load()
+            history = HistoryPolicy.prune(stored, now: Date(), retention: retention)
+            if history != stored { persistHistory() }
+        } catch { historyMessage = "Saved history couldn’t be read. New dictations will start a fresh history." }
+    }
+    private func persistHistory() {
+        guard !previewMode, let historyStore else { return }
+        do { try historyStore.save(history); historyMessage = "" }
+        catch { historyMessage = "History couldn’t be saved on this Mac. Your dictation wasn’t affected." }
+    }
+    /// Only confirmed insertions and explicit Copy reach history. Practice, cancel and discard never do.
+    private func recordHistory(_ text: String, practice: Bool) {
+        guard !practice, let retention = historyRetention, retention.keepsHistory else { return }
+        history = HistoryPolicy.adding(text, at: Date(), to: history, retention: retention)
+        persistHistory()
+    }
     private func notify() {
         if phase == .ready, !workerBusy, !modelBusy, message == readinessWaitMessage {
             message = canStart ? "Ready when you are. Microphone off." : !modelVerified ? modelMessage : "Check your microphone and permissions in Settings."
@@ -610,6 +682,22 @@ final class AppModel: ObservableObject {
         guard previewMode else { return }
         modelBusy = false; workerBusy = false
         mode = .toggle; dictationShortcut = .controlShiftD; microphoneUID = "preview-input"
+        historyRetention = nil; history = []
+        if state == "history" || state == "history-empty" { historyRetention = .week }
+        if state == "history-off" { historyRetention = .off }
+        if state == "history" {
+            // Synthetic sample text only; previews never read the history file.
+            let now = Date()
+            let samples: [(String, TimeInterval)] = [
+                ("Let’s move the design review to Thursday afternoon so everyone can join.", 12 * 60),
+                ("Add a short note to the README explaining how to download the speech model.", 58 * 60),
+                ("Refactor the settings sidebar so each section keeps its own scroll position, then run the native checks again.", 3 * 3600),
+                ("Groceries: oat milk, lemons, rice, and something for Saturday dinner.", 26 * 3600),
+                ("Thanks for the notes — I’ll send an updated draft tomorrow morning.", 29 * 3600),
+                ("Remember to ask about the older-Mac test machine.", 4 * 86_400)
+            ]
+            history = samples.map { HistoryEntry(date: now.addingTimeInterval(-$0.1), text: $0.0) }
+        }
         devices = [MicrophoneDevice(id: "preview-input", objectID: 0, name: "Built-in Microphone"),
                    MicrophoneDevice(id: "preview-external", objectID: 1, name: "USB Microphone")]
         modelInstalled = state != "setup"; microphoneAllowed = state != "setup"; accessibilityAllowed = state != "setup"

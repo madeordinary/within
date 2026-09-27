@@ -19,32 +19,40 @@ func renderPreviews(to directory: URL) throws {
         try png.write(to: directory.appendingPathComponent(name + ".png"))
         window.orderOut(nil)
     }
-    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle"] {
+    let shellSize = NSSize(width: 900, height: 700)
+    func shell(_ model: AppModel, _ page: AppPage, practice: Bool = false) -> AppWindowView {
+        let navigation = AppNavigation()
+        if page != .home { _ = navigation.navigate(to: page, model: model, blocked: false, confirmPracticeExit: { false }) }
+        if practice { _ = navigation.navigate(to: .home, practice: true, model: model, blocked: false, confirmPracticeExit: { false }) }
+        return AppWindowView(model: model, navigation: navigation, togglePractice: { _ in })
+    }
+    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle", "history", "history-empty", "history-off"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
-        if state == "practice-empty" {
+        if state == "practice-empty" || state == "history" {
             model.mode = .hold
             _ = model.chooseShortcut(DictationShortcut(keyCode: 59, modifiers: 0, keyLabel: "Left Control"))
         }
         for dark in [false, true] {
             let name = "within-\(state)\(dark ? "-dark" : "")"
             switch state {
-            case "recovery": try render(name, view: RecoveryView(model: model), size: NSSize(width: 620, height: 500), dark: dark)
-            case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: 82), dark: dark)
-            case "practice", "practice-empty", "practice-empty-toggle": try render(name, view: PracticeView(model: model), size: NSSize(width: 600, height: 510), dark: dark)
-            default: try render(name, view: MainView(model: model), size: NSSize(width: 560, height: 580), dark: dark)
+            case "recovery": try render(name, view: shell(model, .recovery), size: shellSize, dark: dark)
+            case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: PillView.height), dark: dark)
+            case "practice", "practice-empty", "practice-empty-toggle": try render(name, view: shell(model, .home, practice: true), size: NSSize(width: 900, height: 900), dark: dark)
+            default: try render(name, view: shell(model, .home), size: shellSize, dark: dark)
+            }
+            if state == "history" {
+                model.settingsSection = "History"
+                try render("within-settings-history\(dark ? "-dark" : "")", view: shell(model, .settings), size: shellSize, dark: dark)
             }
             if state == "ready" {
-                try render("within-home-practice-expanded\(dark ? "-dark" : "")", view: MainView(model: model, practiceExpanded: true), size: NSSize(width: 660, height: 1000), dark: dark)
-                try render("within-home-practice-compact\(dark ? "-dark" : "")", view: MainView(model: model, practiceExpanded: true), size: NSSize(width: 620, height: 600), dark: dark)
-                try render("within-home-compact\(dark ? "-dark" : "")", view: MainView(model: model), size: NSSize(width: 530, height: 500), dark: dark)
                 for section in ["General", "Audio", "Privacy", "Model", "About"] {
                     model.settingsSection = section
-                    try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: SettingsView(model: model), size: NSSize(width: 640, height: 630), dark: dark)
+                    try render("within-settings-\(section.lowercased())\(dark ? "-dark" : "")", view: shell(model, .settings), size: shellSize, dark: dark)
                 }
-                try render("within-help\(dark ? "-dark" : "")", view: HelpView(model: model), size: NSSize(width: 600, height: 590), dark: dark)
+                try render("within-help\(dark ? "-dark" : "")", view: shell(model, .help), size: shellSize, dark: dark)
                 try render("within-welcome\(dark ? "-dark" : "")", view: SetupView(model: model, step: .constant(0)), size: NSSize(width: 540, height: 650), dark: dark)
-                for step in 1...3 {
+                for step in 1...4 {
                     try render("within-setup-step-\(step + 1)\(dark ? "-dark" : "")", view: SetupView(model: model, step: .constant(step)), size: NSSize(width: 540, height: 650), dark: dark)
                 }
                 let shortcutPreview = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)

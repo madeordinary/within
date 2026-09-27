@@ -32,12 +32,11 @@ struct ActivationControls: View {
     @ObservedObject var model: AppModel
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Picker("Recording gesture", selection: $model.mode) {
-                Text("Hold to talk").tag(ActivationMode.hold)
-                Text("Press to start / stop").tag(ActivationMode.toggle)
-            }.pickerStyle(.segmented).disabled(model.workerBusy || model.phase != .ready)
-            Text(model.mode == .hold ? "Hold the shortcut while speaking. Release to finish." : "Press once to start and again to finish. No need to hold the keys.")
-                .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+            HStack(spacing: 10) {
+                modeOption(.hold, title: "Hold to talk", detail: "Hold the shortcut while speaking. Release to finish.")
+                modeOption(.toggle, title: "Press to start / stop", detail: "Press once to start and again to finish.")
+            }.disabled(model.workerBusy || model.phase != .ready)
+                .accessibilityElement(children: .contain).accessibilityLabel("Recording gesture")
             ShortcutControl(model: model)
             if model.dictationShortcut.isModifierOnly && !model.accessibilityAllowed {
                 HStack(alignment: .top) {
@@ -53,22 +52,51 @@ struct ActivationControls: View {
             Text("Escape cancels. Recording stops at five minutes.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
         }
     }
+    private func modeOption(_ mode: ActivationMode, title: String, detail: String) -> some View {
+        let selected = model.mode == mode
+        return Button { model.mode = mode } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle").font(.system(size: 15))
+                    .foregroundStyle(selected ? Palette.accent : Palette.secondary.opacity(0.6)).accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title).font(.system(size: 13, weight: .semibold))
+                    Text(detail).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }.padding(12).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(selected ? Palette.tint.opacity(0.75) : Palette.canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous).stroke(selected ? Palette.accent.opacity(0.55) : .clear, lineWidth: 1.5))
+                .contentShape(Rectangle())
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+    }
 }
 
 /// Shared by Home, setup and Settings so each entry point uses the same editing boundary.
 struct ShortcutControl: View {
     @ObservedObject var model: AppModel
+    var hero = false
     @State private var recordingShortcut = false
     var body: some View {
-        HStack(spacing: 12) {
-            Text("Shortcut").font(.system(size: 13, weight: .medium))
-            Spacer(minLength: 8)
-            Text(model.shortcutLabel).font(.system(size: 14, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 10).padding(.vertical, 7)
-                .background(Palette.tint, in: RoundedRectangle(cornerRadius: 7))
-                .accessibilityLabel(model.dictationShortcut.accessibilityName)
-            Button("Change…") { recordingShortcut = model.beginShortcutEditing() }
-                .accessibilityLabel("Change dictation shortcut")
+        Group {
+            if hero {
+                VStack(spacing: 16) {
+                    Keycaps(shortcut: model.dictationShortcut, large: true)
+                    Button("Change shortcut…") { recordingShortcut = model.beginShortcutEditing() }.quietAction()
+                        .accessibilityLabel("Change dictation shortcut")
+                }
+            } else {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Shortcut").font(.system(size: 13, weight: .medium))
+                        Text(model.mode == .hold ? "Hold to talk. Release to finish." : "Press once to start, again to finish.")
+                            .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                    }
+                    Spacer(minLength: 8)
+                    Keycaps(shortcut: model.dictationShortcut)
+                    Button("Change…") { recordingShortcut = model.beginShortcutEditing() }.quietAction()
+                        .accessibilityLabel("Change dictation shortcut")
+                }
+            }
         }.disabled(model.workerBusy || model.phase != .ready || model.editingShortcut)
         .sheet(isPresented: $recordingShortcut, onDismiss: model.endShortcutEditing) {
             ShortcutRecorderView(model: model)
@@ -234,20 +262,27 @@ struct SettingsView: View {
     @ObservedObject var model: AppModel
     @State private var pasteDisclosure = false
     @State private var showingDiagnostics = false
+    @State private var confirmingClear = false
+    @State private var pendingRetention: HistoryRetention?
+    static let sections = [("General", "slider.horizontal.3"), ("Audio", "mic"), ("History", "clock.arrow.circlepath"), ("Privacy", "hand.raised"), ("Model", "internaldrive"), ("About", "info.circle")]
     var body: some View {
-        TabView(selection: $model.settingsSection) {
             page {
+                switch model.settingsSection {
+            case "General":
                 heading("Your everyday rhythm", detail: "Choose how you start and finish dictation.")
                 ActivationControls(model: model).withinSurface()
-                VStack(alignment: .leading, spacing: 16) {
-                    Toggle("Start Within at login", isOn: Binding(get: { model.loginEnabled }, set: model.setLaunchAtLogin))
-                    if !model.loginMessage.isEmpty { Text(model.loginMessage).font(.system(size: 11)).foregroundStyle(Palette.secondary) }
-                    Toggle("Play start and stop sounds", isOn: $model.soundsEnabled)
-                }.withinSurface()
+                VStack(alignment: .leading, spacing: 12) {
+                    row("Start Within at login", detail: model.loginMessage.isEmpty ? nil : model.loginMessage) {
+                        Toggle("Start Within at login", isOn: Binding(get: { model.loginEnabled }, set: model.setLaunchAtLogin)).labelsHidden().toggleStyle(.switch)
+                    }
+                    Divider()
+                    row("Play start and stop sounds") {
+                        Toggle("Play start and stop sounds", isOn: $model.soundsEnabled).labelsHidden().toggleStyle(.switch)
+                    }
+                }.withinSurface(padding: 16)
                 Text("Closing Home keeps Within available in the Dock and menu bar. Quit Within exits the app completely.")
                     .font(.system(size: 12)).foregroundStyle(Palette.secondary)
-            }.tabItem { Label("General", systemImage: "slider.horizontal.3") }.tag("General")
-            page {
+            case "Audio":
                 heading("Your microphone", detail: "Choose an input. Within never silently switches it during dictation.")
                 MicrophoneControls(model: model).withinSurface()
                 VStack(alignment: .leading, spacing: 18) {
@@ -255,12 +290,25 @@ struct SettingsView: View {
                     Divider()
                     PermissionRow(title: "Accessibility", detail: "Inserts into your original field and checks focus. Optional for practice and Copy.", allowed: model.accessibilityAllowed, action: model.requestAccessibility)
                 }.withinSurface()
-            }.tabItem { Label("Audio", systemImage: "mic") }.tag("Audio")
-            page {
+            case "History":
+                heading("Your dictation history", detail: "Saved only on this Mac, left out of Time Machine backups and never uploaded.")
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Keep dictations").font(.system(size: 13, weight: .medium))
+                    HistoryRetentionPicker(selection: Binding(get: { model.effectiveRetention }, set: requestRetention))
+                    Text(model.historyRetention == nil ? "You haven’t chosen yet, so nothing is saved." : model.effectiveRetention.keepsHistory ? "Only words you insert or copy are kept. Practice, canceled and discarded words never are." : "Dictations aren’t saved.")
+                        .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                }.withinSurface()
+                VStack(alignment: .leading, spacing: 12) {
+                    row(model.history.count == 1 ? "1 saved dictation" : "\(model.history.count) saved dictations",
+                        detail: "Deleting removes words from Within’s history file. Like other deleted files, it isn’t a secure erase of the disk.") {
+                        Button("Clear history…", role: .destructive) { confirmingClear = true }.quietAction().disabled(model.history.isEmpty)
+                    }
+                }.withinSurface(padding: 16)
+            case "Privacy":
                 heading("Your words stay with you", detail: "Nothing crosses a boundary without your choice.")
                 VStack(alignment: .leading, spacing: 15) {
                     Label("On-device transcription", systemImage: "desktopcomputer")
-                    Label("No recordings or dictation history saved", systemImage: "clock.badge.xmark")
+                    Label(model.effectiveRetention.keepsHistory ? "No recordings saved · dictation history stays on this Mac" : "No recordings or dictation history saved", systemImage: "clock.badge.xmark")
                     Label("No account, analytics, or cloud fallback", systemImage: "lock.shield")
                     Text("Audio and pending words stay in memory. Copy uses your clipboard only when you choose it. Quitting clears pending text.")
                         .font(.system(size: 12)).foregroundStyle(Palette.secondary)
@@ -276,14 +324,12 @@ struct SettingsView: View {
                             .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                     }
                 }.withinSurface()
-            }.tabItem { Label("Privacy", systemImage: "hand.raised") }.tag("Privacy")
-            page {
+            case "Model":
                 heading("One local speech model", detail: "Prepare it once. Dictate without a network connection.")
                 ModelPanel(model: model).withinSurface()
-            }.tabItem { Label("Model", systemImage: "internaldrive") }.tag("Model")
-            page {
+            case "About":
                 Brand()
-                Text("A little more room to think.").font(.system(size: 22, weight: .semibold))
+                Text("A little more room to think.").font(Typography.display(24))
                 Text("Within, by Made Ordinary\nEngineering preview · \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development")")
                     .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                 Text("A free, open-source Mac app for local English dictation. This build is for local evaluation; release signing, supported-system and broader app compatibility checks remain pending.")
@@ -297,10 +343,23 @@ struct SettingsView: View {
                 Button("Review diagnostics…") { showingDiagnostics = true }
                 Text("Review content-free status and error information before choosing to save a report. Nothing is sent automatically.")
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
-            }.tabItem { Label("About", systemImage: "info.circle") }.tag("About")
-        }.padding(16).frame(minWidth: 600, minHeight: 560).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)
+                default: EmptyView()
+                }
+            }
+        .frame(minWidth: 460, minHeight: 420).foregroundStyle(Palette.text).tint(Palette.accent)
             .onAppear { model.refreshPermissions() }
             .sheet(isPresented: $showingDiagnostics) { DiagnosticsView(text: model.diagnostics()) }
+            .confirmationDialog("Clear all dictation history?", isPresented: $confirmingClear) {
+                Button("Clear history", role: .destructive, action: model.clearHistory)
+                Button("Keep history", role: .cancel) {}
+            } message: { Text("This deletes every saved dictation from this Mac. It cannot be undone.") }
+            .confirmationDialog(retentionPrompt, isPresented: Binding(get: { pendingRetention != nil }, set: { if !$0 { pendingRetention = nil } })) {
+                Button(pendingRetention == .off ? "Delete and turn off" : "Delete older dictations", role: .destructive) {
+                    if let pendingRetention { model.chooseHistoryRetention(pendingRetention) }
+                    pendingRetention = nil
+                }
+                Button("Keep them", role: .cancel) { pendingRetention = nil }
+            } message: { Text("Removed dictations cannot be recovered.") }
             .confirmationDialog("Enable compatibility paste?", isPresented: $pasteDisclosure) {
                 Button("Enable compatibility paste") { model.compatibilityPaste = true }
                 Button("Keep it off", role: .cancel) {}
@@ -308,13 +367,34 @@ struct SettingsView: View {
                 Text("Your words will temporarily enter the clipboard. Other apps, clipboard managers, and Universal Clipboard may read or sync them. Clipboard restoration is best effort; you must review the insertion result.")
             }
     }
+    /// Shortening retention or turning history off asks before anything is deleted.
+    private func requestRetention(_ retention: HistoryRetention) {
+        let remaining = HistoryPolicy.prune(model.history, now: Date(), retention: retention).count
+        if remaining < model.history.count { pendingRetention = retention } else { model.chooseHistoryRetention(retention) }
+    }
+    private var retentionPrompt: String {
+        guard let pendingRetention else { return "" }
+        let removed = model.history.count - HistoryPolicy.prune(model.history, now: Date(), retention: pendingRetention).count
+        let noun = removed == 1 ? "1 saved dictation" : "\(removed) saved dictations"
+        return pendingRetention == .off ? "Turn off history and delete \(noun)?" : "Keep \(pendingRetention.title) and delete \(noun)?"
+    }
     private func page<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-        ScrollView { VStack(alignment: .leading, spacing: 22, content: content).font(.system(size: 13)).padding(22).frame(maxWidth: .infinity, alignment: .leading) }
+        ScrollView { VStack(alignment: .leading, spacing: 20, content: content).font(.system(size: 13)).padding(.horizontal, 32).padding(.vertical, 30).frame(maxWidth: .infinity, alignment: .leading) }
     }
     private func heading(_ title: String, detail: String) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title).font(.system(size: 23, weight: .semibold)).tracking(-0.4)
+            Text(title).font(Typography.display(26)).accessibilityAddTraits(.isHeader)
             Text(detail).font(.system(size: 12)).foregroundStyle(Palette.secondary)
+        }
+    }
+    private func row<Control: View>(_ title: String, detail: String? = nil, @ViewBuilder control: () -> Control) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title).font(.system(size: 13, weight: .medium))
+                if let detail { Text(detail).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true) }
+            }
+            Spacer(minLength: 12)
+            control()
         }
     }
 }
@@ -324,16 +404,16 @@ struct HelpView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                Text("A little help with Within.").font(.system(size: 25, weight: .semibold))
+                Text("A little help with Within.").font(Typography.display(30)).accessibilityAddTraits(.isHeader)
                 help("Start with your cursor", icon: "cursorarrow", text: "Choose an editable field in another app, then use \(model.shortcutLabel). \(model.mode == .hold ? "Hold while speaking and release to finish." : "Press once to start and again to finish.") Escape cancels without transcribing.")
                 help("Try it here first", icon: "waveform", text: "Expand Try dictation on Home. Opening the practice area does not record; choose Start practice or use the shortcut while the area is open and Within is active. Your practice words stay until you clear them or quit.")
                 Button("Try dictation") { model.showPractice?() }.disabled(model.workerBusy)
                 help("When words need review", icon: "text.bubble", text: "If the destination changes or insertion is uncertain, Within keeps your words for review. Return rechecks the original field. Copy uses the clipboard only when you choose it. Closing recovery keeps pending words in memory; Discard removes them after confirmation.")
                 help("Check the selected microphone", icon: "mic", text: "If an input disappears, reconnect it or choose another in Settings → Audio. Within does not switch devices or restart capture silently.")
-                help("One window, fewer interruptions", icon: "macwindow", text: "Home, Settings, setup and Help share this window. Use Back to return. Command-comma opens Settings. Closing the window leaves Within in the Dock and menu bar; Quit Within exits completely and asks before discarding active or pending dictation.")
-                help("Made to stay local", icon: "lock.shield", text: "The speech model is a separate, explicit download. Dictation itself runs on your Mac. No recordings or dictation history are saved. This engineering preview has no automatic updater.")
-            }.padding(30).frame(maxWidth: .infinity, alignment: .leading)
-        }.frame(minWidth: 540, minHeight: 480).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)
+                help("One window, fewer interruptions", icon: "macwindow", text: "Dictation, Settings and Help share this window’s sidebar. Command-comma opens Settings. Closing the window leaves Within in the Dock and menu bar; Quit Within exits completely and asks before discarding active or pending dictation.")
+                help("Made to stay local", icon: "lock.shield", text: "The speech model is a separate, explicit download. Dictation itself runs on your Mac. No recordings are saved. Dictation history is kept only if you turn it on, only on this Mac, for as long as you choose. This engineering preview has no automatic updater.")
+            }.padding(.horizontal, 32).padding(.vertical, 30).frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(minWidth: 460, minHeight: 420).foregroundStyle(Palette.text).tint(Palette.accent)
     }
     private func help(_ title: String, icon: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 9) {

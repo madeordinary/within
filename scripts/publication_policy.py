@@ -27,6 +27,8 @@ Sources/WithinApp/AccessibilityTarget.swift
 Sources/WithinApp/AppDelegate.swift
 Sources/WithinApp/AppModel.swift
 Sources/WithinApp/DesignSystem.swift
+Sources/WithinApp/HistoryStore.swift
+Sources/WithinApp/HistoryView.swift
 Sources/WithinApp/SettingsView.swift
 Sources/WithinApp/CaptureEngine.swift
 Sources/WithinApp/CompatibilityPaste.swift
@@ -47,6 +49,7 @@ Sources/WithinAudioBuffer/include/WithinAudioBuffer.h
 Sources/WithinCore/AudioRing.swift
 Sources/WithinCore/ClipboardLease.swift
 Sources/WithinCore/Diagnostics.swift
+Sources/WithinCore/DictationHistory.swift
 Sources/WithinCore/InsertionTrial.swift
 Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
@@ -56,6 +59,7 @@ THIRD_PARTY_NOTICES.md
 Tests/AudioBufferStress/main.c
 Tests/Tooling/test_publication.py
 Tests/WithinCoreTests/ClipboardLeaseTests.swift
+Tests/WithinCoreTests/DictationHistoryTests.swift
 Tests/WithinCoreTests/InsertionTrialTests.swift
 Tests/WithinCoreTests/IntegrityTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift

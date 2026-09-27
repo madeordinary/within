@@ -5,7 +5,7 @@ import Darwin
 import Carbon
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate, NSToolbarItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var model: AppModel!
     private var mainWindow: NSWindow?
     private let navigation = AppNavigation()
@@ -33,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             model.showSettings = { [weak self] in self?.showSettingsWindow() }
             model.showAudioSettings = { [weak self] in self?.showSettingsWindow(section: "Audio") }
             model.showModelSettings = { [weak self] in self?.showSettingsWindow(section: "Model") }
+            model.showHistorySettings = { [weak self] in self?.showSettingsWindow(section: "History") }
             model.showHelp = { [weak self] in self?.showHelpWindow() }
             model.showSetup = { [weak self] in self?.showSetupWindow() }
             model.showPractice = { [weak self] in self?.showPracticeWindow() }
@@ -177,13 +178,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func ensureMainWindow() {
         if mainWindow == nil {
-            let window = makeWindow("Within", size: NSSize(width: 660, height: 720), minimum: NSSize(width: 620, height: 640), autosave: "Within.Main.v3",
+            let window = makeWindow("Within", size: NSSize(width: 900, height: 700), minimum: NSSize(width: 720, height: 560), autosave: "Within.Main.v4",
                 view: AppWindowView(model: model, navigation: navigation, togglePractice: { [weak self] expanded in
                     self?.navigate(to: .home, practice: expanded)
+                }, navigate: { [weak self] page in
+                    self?.navigate(to: page)
+                }, openSettings: { [weak self] section in
+                    self?.showSettingsWindow(section: section)
                 }))
-            let toolbar = NSToolbar(identifier: "Within.HomeToolbar"); toolbar.delegate = self
-            toolbar.displayMode = .iconOnly; toolbar.allowsUserCustomization = false
-            window.toolbar = toolbar; window.toolbarStyle = .unified
+            // The sidebar runs under a transparent title bar; the window title stays for accessibility and Mission Control.
+            window.styleMask.insert(.fullSizeContentView)
+            window.titlebarAppearsTransparent = true
+            window.titleVisibility = .hidden
             mainWindow = window
         }
     }
@@ -193,7 +199,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     private func showHelpWindow() { navigate(to: .help) }
     private func showSetupWindow() { navigate(to: .setup) }
     private func showPracticeWindow() { navigate(to: .home, practice: true) }
-    @objc private func goBack() { navigate(to: navigation.backDestination, back: true) }
 
     private var navigationBlocked: Bool { NSApp.modalWindow != nil || mainWindow?.attachedSheet != nil }
     static func practiceIsActive(navigation: AppNavigation, windowIsKey: Bool, appIsActive: Bool, hasDialog: Bool) -> Bool {
@@ -219,7 +224,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         case .setup: mainWindow?.title = "Set Up Within"
         case .recovery: mainWindow?.title = "Your words · Within"
         }
-        mainWindow?.toolbar?.validateVisibleItems()
     }
     func windowDidEndSheet(_ notification: Notification) {
         DispatchQueue.main.async { [weak self] in self?.presentDeferredRecovery() }
@@ -263,27 +267,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         }
         return alert.runModal()
     }
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
-    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
-        item.itemIdentifier.rawValue != "Within.Back" || navigation.page != .home
-    }
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.init("Within.Back"), .flexibleSpace, .init("Within.Help"), .init("Within.Settings")] }
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        if identifier.rawValue == "Within.Back" {
-            let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "Back"; item.toolTip = "Back"
-            item.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")
-            item.target = self; item.action = #selector(goBack); item.isBordered = true
-            return item
-        }
-        guard identifier.rawValue == "Within.Help" || identifier.rawValue == "Within.Settings" else { return nil }
-        let help = identifier.rawValue == "Within.Help"
-        let item = NSToolbarItem(itemIdentifier: identifier)
-        item.label = help ? "Help" : "Settings"; item.toolTip = help ? "Within Help" : "Settings (⌘,)"
-        item.image = NSImage(systemSymbolName: help ? "questionmark.circle" : "gearshape", accessibilityDescription: item.label)
-        item.target = self; item.action = help ? #selector(openHelp) : #selector(openSettings); item.isBordered = true
-        return item
-    }
     private func showRecoveryWindow() {
         guard model.phase == .recovery else { return }
         navigate(to: .recovery)
@@ -298,7 +281,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         reviewItem?.isHidden = model.phase != .recovery
         if active {
             if pill == nil {
-                let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: 82), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: PillView.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
                 panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; panel.hidesOnDeactivate = false
                 panel.contentView = NSHostingView(rootView: PillView(model: model)); pill = panel
