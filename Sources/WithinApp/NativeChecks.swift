@@ -212,6 +212,34 @@ func nativeChecks(to output: URL) throws {
     let unchosen = fixture("ready")
     let historyPolicyPassed = prunedToDay && historyPreview.history.isEmpty && unchosen.historyRetention == nil
         && unchosen.privacySummary.contains("No recordings or dictation history saved")
+    // Notes storage in a temporary folder: owner-only, atomic, per-note files kept in backups.
+    let notesFolder = FileManager.default.temporaryDirectory.appendingPathComponent("Within.NotesFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: notesFolder) }
+    let notesStore = NotesStore(directory: notesFolder)
+    var fixtureNote = Note(title: "Synthetic", created: Date(), body: "synthetic note words")
+    try notesStore.save(fixtureNote)
+    fixtureNote.body = NoteText.appending("more synthetic words", to: fixtureNote.body)
+    try notesStore.save(fixtureNote)
+    let noteFile = notesFolder.appendingPathComponent("\(fixtureNote.id.uuidString).json")
+    let noteMode = (try FileManager.default.attributesOfItem(atPath: noteFile.path)[.posixPermissions] as? NSNumber)?.intValue
+    let notesFolderMode = (try FileManager.default.attributesOfItem(atPath: notesFolder.path)[.posixPermissions] as? NSNumber)?.intValue
+    let notesInBackups = try notesFolder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup != true
+    let reloadedNotes = notesStore.loadAll()
+    try notesStore.delete(fixtureNote.id)
+    let notesFolderEmpty = try FileManager.default.contentsOfDirectory(atPath: notesFolder.path).isEmpty
+    let notesStorePassed = noteMode == 0o600 && notesFolderMode == 0o700 && notesInBackups
+        && reloadedNotes.notes == [fixtureNote] && reloadedNotes.unreadable == 0 && notesFolderEmpty
+    // One capture at a time: while a note records, dictation refuses and cancel keeps the note.
+    let noteSession = fixture("note-recording")
+    noteSession.start(practice: false)
+    let dictationRefused = noteSession.message.contains("Stop your note recording") && noteSession.isRecordingNote && noteSession.phase == .recording
+    noteSession.startNoteRecording(noteSession.notes[1].id)
+    let secondRecordingRefused = noteSession.recordingNoteID == noteSession.notes[0].id
+    // Canceling while a note is still preparing ends cleanly instead of bouncing between stop and cancel.
+    let preparingNote = fixture("note-preparing")
+    preparingNote.cancel(cause: .cancelButton)
+    let preparingCancelEnded = preparingNote.phase == .ready && preparingNote.message.contains("canceled before it started")
+    let notesGuardsPassed = dictationRefused && secondRecordingRefused && !noteSession.canStart && preparingCancelEnded
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
@@ -256,8 +284,10 @@ func nativeChecks(to output: URL) throws {
         "navigationPreservesPendingWordsPassed": recoveryNavigationPassed,
         "historyStoreOwnerOnlyBackupExcludedPassed": historyStorePassed,
         "historyRetentionPreviewPassed": historyPolicyPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed,
-        "notTested": ["live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
+        "notesStoreOwnerOnlyAtomicPassed": notesStorePassed,
+        "notesOneCaptureAtATimePassed": notesGuardsPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed,
+        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

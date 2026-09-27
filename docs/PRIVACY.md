@@ -22,6 +22,14 @@ Only final text and its time are saved, after a confirmed insertion, a confirmed
 
 History is one file, `~/Library/Application Support/Within/History/dictation-history.json`, readable only by your macOS account (folder 0700, file 0600) and replaced atomically. The folder is excluded from Time Machine backups. Nothing is synced or uploaded. Copying an entry uses the clipboard with the same caveats as recovery Copy. Deleting an entry or clearing history rewrites or removes the file; on APFS and SSD storage that is not a secure erase. If FileVault is on, it protects the file while the Mac is shut down; it does not hide the file from apps running under your account. History content and counts never appear in diagnostics.
 
+## Voice notes
+
+Notes are pages you type into or talk into. Record starts the microphone for that note only; Stop, lock, sleep, an audio stall or a permission change ends the recording and keeps every word heard so far, with a visible marker where it paused. Recording again adds a new paragraph. Only one recording runs at a time: dictation is refused while a note records, and Escape never cancels a note recording.
+
+While recording, text appears as the local model processes it. Confirmed words are also written to the note file about every ten seconds so a crash keeps them. Audio is never written to disk. One recording is limited to three hours.
+
+Each note is one file in `~/Library/Application Support/Within/Notes/`, readable only by your macOS account (folder 0700, files 0600) and replaced atomically. Unlike dictation history, notes are deliberate documents and **are included in Time Machine backups**. Nothing is synced or uploaded. Deleting a note removes its file; on APFS and SSD storage that is not a secure erase, and existing backups keep earlier copies until they expire.
+
 ## Insertion and clipboard
 
 Direct insertion requires Accessibility permission and sets selected text on the original control. The app retains target identities without reading destination text, selected text, document contents, or window titles. It refuses secure or unknown targets and rechecks focus and permissions before writing. It never synthesizes Return or Send. Uncertain writes are not automatically retried.
@@ -40,6 +48,7 @@ App-managed storage consists of:
 - Temporary staging in `~/Library/Application Support/Within/Model Downloads/`.
 - An empty single-instance lock in the same application-support folder.
 - Optional dictation history in `~/Library/Application Support/Within/History/`, only after you choose to keep it.
+- Notes you create, in `~/Library/Application Support/Within/Notes/`.
 - Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection and history retention; no dictation content.
 
 Core ML may also create OS-managed compiled-model caches. Microphone permission is required for recording. Accessibility is optional for practice/Copy and required for insertion and global modifier-only shortcuts. Start at login is an explicit Settings choice. The preview is a single process with Hardened Runtime and an audio-input entitlement; App Sandbox compatibility and trusted public signing remain release gates.
@@ -52,4 +61,4 @@ App-controlled production logging does not serialize audio or transcripts, and t
 
 The diagnostic preview includes the latest session's startup durations, trigger category, and whether it used Practice. These measurements stay in memory unless you explicitly save the report; they contain no audio, text, wall-clock timestamps, or destination/device identities.
 
-To remove the model, use Settings → Remove model. To delete saved dictations, use Settings → History → Clear history. To uninstall, quit and delete Within, optionally remove its application-support folder and preference domain, disable Start at login, and revoke Microphone and Accessibility permissions in System Settings.
+To remove the model, use Settings → Remove model. To delete saved dictations, use Settings → History → Clear history. To delete a note, use its trash button. To uninstall, quit and delete Within, optionally remove its application-support folder and preference domain, disable Start at login, and revoke Microphone and Accessibility permissions in System Settings.

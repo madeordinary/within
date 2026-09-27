@@ -35,6 +35,8 @@ Sources/WithinApp/CompatibilityPaste.swift
 Sources/WithinApp/LocalSpeech.swift
 Sources/WithinApp/ModelStore.swift
 Sources/WithinApp/ModelStoreCheck.swift
+Sources/WithinApp/NotesStore.swift
+Sources/WithinApp/NotesView.swift
 Sources/WithinApp/NativeChecks.swift
 Sources/WithinApp/OfflineProbe.swift
 Sources/WithinApp/PreviewRenderer.swift
@@ -47,12 +49,14 @@ Sources/WithinApp/main.swift
 Sources/WithinAudioBuffer/WithinAudioBuffer.c
 Sources/WithinAudioBuffer/include/WithinAudioBuffer.h
 Sources/WithinCore/AudioRing.swift
+Sources/WithinCore/CaptureLimits.swift
 Sources/WithinCore/ClipboardLease.swift
 Sources/WithinCore/Diagnostics.swift
 Sources/WithinCore/DictationHistory.swift
 Sources/WithinCore/InsertionTrial.swift
 Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
+Sources/WithinCore/Notes.swift
 Sources/WithinCore/SessionState.swift
 Sources/WithinCore/ShortcutGesture.swift
 THIRD_PARTY_NOTICES.md
@@ -63,6 +67,7 @@ Tests/WithinCoreTests/DictationHistoryTests.swift
 Tests/WithinCoreTests/InsertionTrialTests.swift
 Tests/WithinCoreTests/IntegrityTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift
+Tests/WithinCoreTests/NotesTests.swift
 Tests/WithinCoreTests/ShortcutTests.swift
 Tests/WithinCoreTests/SystemBoundaryTests.swift
 Tests/WithinCoreTests/WorkflowTests.swift

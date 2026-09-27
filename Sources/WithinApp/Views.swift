@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import WithinCore
 
-enum AppPage { case home, settings, help, setup, recovery }
+enum AppPage { case home, notes, settings, help, setup, recovery }
 
 /// Presentation state is transient; navigating never starts capture or clears words.
 @MainActor
@@ -71,6 +71,7 @@ struct AppWindowView: View {
         switch navigation.page {
         case .home, .setup:
             MainView(model: model, practiceExpanded: navigation.practiceExpanded, togglePractice: togglePractice)
+        case .notes: NotesView(model: model)
         case .settings: SettingsView(model: model)
         case .help: HelpView(model: model)
         case .recovery: RecoveryView(model: model)
@@ -78,7 +79,7 @@ struct AppWindowView: View {
     }
 }
 
-/// Dictation is the only space until Notes and Meetings work; no placeholder tabs.
+/// Spaces appear only once they work: Dictation and Notes now, Meetings later. No placeholder tabs.
 struct SidebarView: View {
     @ObservedObject var model: AppModel
     let page: AppPage
@@ -88,6 +89,7 @@ struct SidebarView: View {
         VStack(alignment: .leading, spacing: 2) {
             Brand(compact: true).padding(.horizontal, 10).padding(.top, 46).padding(.bottom, 22)
             item("Dictation", icon: "waveform", selected: page == .home) { navigate(.home) }
+            item("Notes", icon: "note.text", selected: page == .notes, emphasized: model.isRecordingNote) { navigate(.notes) }
             if model.phase == .recovery {
                 item("Words to review", icon: "text.bubble", selected: page == .recovery, emphasized: true) { navigate(.recovery) }
             }

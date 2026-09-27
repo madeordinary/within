@@ -148,4 +148,9 @@ final class WorkflowTests: XCTestCase {
             XCTAssertTrue(change.requiresStop, "Property \(failingProperty) must stop recording")
         }
     }
+    func testDictationCaptureLimitsStayFiveMinutesAndTwentySecondBacklog() {
+        XCTAssertEqual(CaptureLimits.dictation, CaptureLimits(totalSeconds: 300, backlogSeconds: 20))
+        XCTAssertEqual(CaptureLimits.dictation.ringCapacity(sampleRate: 48_000), 960_000)
+        XCTAssertEqual(CaptureLimits.dictation.sampleLimit(sampleRate: 48_000), 14_400_000)
+    }
 }

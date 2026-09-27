@@ -10,11 +10,12 @@ Native macOS dictation with on-device transcription and explicit control over re
 
 “Nothing crosses a boundary without your choice.”
 
-- Recording starts only through an explicit shortcut or app action.
+- Recording starts only through an explicit shortcut or app action, including Record in a note.
 - A separately downloaded Parakeet model transcribes locally.
 - Direct insertion uses Accessibility and rechecks the original destination.
 - Uncertain insertion keeps words available for review, explicit Copy, or Discard.
 - No account, telemetry, or cloud transcription. Dictation history is off until you choose it, and then stays on this Mac for as long as you pick.
+- Notes: type or talk into a page; words appear as you speak and are saved only on this Mac. Audio is never saved.
 
 See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
 

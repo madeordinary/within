@@ -47,7 +47,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.stateChanged = { [weak self] in self?.refreshStatus() }
             makeMenu()
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard event.keyCode == 53, let self, self.model.phase != .ready else { return event }
+                // Escape never cancels a note recording; Stop saves it instead.
+                guard event.keyCode == 53, let self, self.model.phase != .ready, !self.model.isRecordingNote else { return event }
                 guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return event }
                 if self.model.phase == .recovery {
                     guard self.navigation.page == .recovery,
@@ -70,7 +71,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
-        if model.phase != .ready {
+        if model.isRecordingNote {
+            let alert = NSAlert(); alert.messageText = "Quit while recording a note?"
+            alert.informativeText = "Your note is saved about every ten seconds. Words from the last few seconds may be lost. Choose Stop in the note first to keep everything."
+            alert.addButton(withTitle: "Keep Within open"); alert.addButton(withTitle: "Quit anyway")
+            if runConfirmation(alert) != .alertSecondButtonReturn { return .terminateCancel }
+        } else if model.phase != .ready {
             let alert = NSAlert(); alert.messageText = "Quit and discard this dictation?"
             alert.informativeText = "Within doesn’t save recordings or pending words. Anything waiting here will be discarded."
             alert.addButton(withTitle: "Keep Within open"); alert.addButton(withTitle: "Quit and discard")
@@ -219,6 +225,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func updateWindowChrome() {
         switch navigation.page {
         case .home: mainWindow?.title = "Within"
+        case .notes: mainWindow?.title = "Notes · Within"
         case .settings: mainWindow?.title = "Settings · Within"
         case .help: mainWindow?.title = "Help · Within"
         case .setup: mainWindow?.title = "Set Up Within"
@@ -275,11 +282,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let active = model.phase == .preparing || model.phase == .recording || model.phase == .transcribing
         statusItem?.button?.image = NSImage(systemSymbolName: model.phase == .recording ? "mic.fill" : "waveform", accessibilityDescription: model.phase == .recording ? "Within. Microphone on." : "Within. Microphone off.")
         statusItem?.button?.toolTip = model.phase == .recording ? "Within · recording" : "Within · microphone off"
-        actionItem?.title = model.isActive ? "Stop and Transcribe" : "Start Dictation"
+        actionItem?.title = model.isRecordingNote ? "Stop Note Recording" : model.isActive ? "Stop and Transcribe" : "Start Dictation"
         actionItem?.isEnabled = model.isActive || model.canStart
         cancelItem?.isEnabled = active
         reviewItem?.isHidden = model.phase != .recovery
-        if active {
+        // The pill belongs to dictation only; a note shows its recording in the Notes space and menu bar.
+        if active && !model.isRecordingNote {
             if pill == nil {
                 let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: PillView.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true

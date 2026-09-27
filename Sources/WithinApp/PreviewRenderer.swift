@@ -26,7 +26,7 @@ func renderPreviews(to directory: URL) throws {
         if practice { _ = navigation.navigate(to: .home, practice: true, model: model, blocked: false, confirmPracticeExit: { false }) }
         return AppWindowView(model: model, navigation: navigation, togglePractice: { _ in })
     }
-    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle", "history", "history-empty", "history-off"] {
+    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle", "history", "history-empty", "history-off", "notes", "note-recording", "notes-empty"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
         if state == "practice-empty" || state == "history" {
@@ -39,6 +39,7 @@ func renderPreviews(to directory: URL) throws {
             case "recovery": try render(name, view: shell(model, .recovery), size: shellSize, dark: dark)
             case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: PillView.height), dark: dark)
             case "practice", "practice-empty", "practice-empty-toggle": try render(name, view: shell(model, .home, practice: true), size: NSSize(width: 900, height: 900), dark: dark)
+            case "notes", "note-recording", "notes-empty": try render(name, view: shell(model, .notes), size: shellSize, dark: dark)
             default: try render(name, view: shell(model, .home), size: shellSize, dark: dark)
             }
             if state == "history" {

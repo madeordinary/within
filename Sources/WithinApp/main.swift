@@ -45,6 +45,12 @@ if CommandLine.arguments.contains("--speech-safety-check") {
 } else if CommandLine.arguments.contains("--model-store-check") {
     Task { await modelStoreCheck() }
     dispatchMain()
+} else if CommandLine.arguments.contains("--live-text-benchmark") {
+    Task { await liveTextBenchmark() }
+    dispatchMain()
+} else if CommandLine.arguments.contains("--long-session-soak") {
+    Task { await longSessionSoak() }
+    dispatchMain()
 } else if CommandLine.arguments.contains("--stream-benchmark") {
     Task { await streamBenchmark() }
     dispatchMain()

@@ -59,19 +59,26 @@ actor LocalSpeech {
         }
     }
 
-    func begin() async throws {
+    /// Dictation and Notes use the proven 11 s window. Smaller windows showed text sooner in a
+    /// fixture comparison but left boundary fragments in the final text (Sep 27), so they are benchmark-only.
+    func begin(config: SlidingWindowAsrConfig = .default) async throws {
         guard let models else { throw SpeechFailure.notReady }
         guard stream == nil, !startingSession else { throw SpeechFailure.busy }
         startingSession = true
         defer { startingSession = false }
-        let next = SlidingWindowAsrManager(config: .default)
+        let next = SlidingWindowAsrManager(config: config)
         try await next.loadModels(models)
         try await next.withinBegin()
         stream = next
     }
 
-    func consume(_ ring: AudioRing, sampleRate: Double) async throws -> String {
+    /// `onUpdate` receives confirmed and still-changing text at most every `updateInterval`.
+    /// Dictation passes nil: no partial text leaves this actor before Stop.
+    func consume(_ ring: AudioRing, sampleRate: Double, updateInterval: Duration = .milliseconds(500),
+                 onUpdate: (@Sendable (_ confirmed: String, _ volatile: String) -> Void)? = nil) async throws -> String {
         guard let stream else { throw SpeechFailure.notReady }
+        let clock = ContinuousClock()
+        var lastUpdate = clock.now
         let converter = AudioConverter()
         guard let format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: sampleRate, channels: 1, interleaved: false) else { throw SpeechFailure.format }
         do {
@@ -88,6 +95,10 @@ actor LocalSpeech {
                 // At most one 0.1 second buffer is in flight. A slow engine fills the
                 // fixed ring and causes a visible stop; no unbounded SDK stream is used.
                 try await stream.withinAppendSamples(resampled)
+                if let onUpdate, lastUpdate.duration(to: clock.now) >= updateInterval {
+                    lastUpdate = clock.now
+                    onUpdate(await stream.confirmedTranscript, await stream.volatileTranscript)
+                }
             }
             let text = try await stream.withinFinish()
             await stream.cleanup()

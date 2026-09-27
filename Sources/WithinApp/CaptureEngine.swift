@@ -26,7 +26,7 @@ final class CaptureEngine {
 
     func resetDiagnostics() { lastConfigurationChange = nil }
 
-    func start(deviceUID: String, didReach: (RecordingStartupStage) -> Void = { _ in }) throws -> AudioRing {
+    func start(deviceUID: String, limits: CaptureLimits = .dictation, didReach: (RecordingStartupStage) -> Void = { _ in }) throws -> AudioRing {
         guard engine == nil, AVCaptureDevice.authorizationStatus(for: .audio) == .authorized else { throw CaptureFailure.permission }
         // Retain only an already-stopped object for the exact explicitly selected input.
         // The system-default route is rebuilt so an idle default-device change is honored.
@@ -58,7 +58,7 @@ final class CaptureEngine {
             guard format.channelCount > 0, format.sampleRate >= 8000, format.sampleRate <= 192000,
                   format.commonFormat == .pcmFormatFloat32, !format.isInterleaved else { throw CaptureFailure.format }
             sampleRate = format.sampleRate
-            let ring = AudioRing(capacity: Int(sampleRate * 20), sampleLimit: UInt64(sampleRate * 300))
+            let ring = AudioRing(capacity: limits.ringCapacity(sampleRate: sampleRate), sampleLimit: limits.sampleLimit(sampleRate: sampleRate))
             self.ring = ring
             input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
                 // The real-time callback only copies channel zero into a fixed C ring.

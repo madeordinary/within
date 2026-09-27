@@ -52,6 +52,13 @@ final class AppModel: ObservableObject {
     @Published private(set) var history: [HistoryEntry] = []
     @Published private(set) var historyRetention: HistoryRetention?
     @Published private(set) var historyMessage = ""
+    /// Voice notes: saved text documents. Audio is never stored.
+    @Published private(set) var notes: [Note] = []
+    @Published var selectedNoteID: UUID?
+    @Published private(set) var recordingNoteID: UUID?
+    @Published private(set) var liveConfirmed = ""
+    @Published private(set) var liveVolatile = ""
+    @Published private(set) var notesMessage = ""
 
     let manifest: ModelManifest
     let store: ModelStore
@@ -77,6 +84,9 @@ final class AppModel: ObservableObject {
     private let previewMode: Bool
     private var historyStore: HistoryStore?
     private var historyTimer: Timer?
+    private var notesStore: NotesStore?
+    private var pendingNoteGap: String?
+    private var lastNoteCheckpoint = ContinuousClock.now
     var stateChanged: (() -> Void)?
     var showMain: (() -> Void)?
     var showSettings: (() -> Void)?
@@ -105,6 +115,8 @@ final class AppModel: ObservableObject {
     var hasActivePracticeSession: Bool { isPracticeSession && (isActive || phase == .transcribing) }
     var startsInPractice: Bool { practiceAreaIsActive?() == true }
     var effectiveRetention: HistoryRetention { historyRetention ?? .off }
+    var isRecordingNote: Bool { recordingNoteID != nil }
+    var selectedNote: Note? { notes.first { $0.id == selectedNoteID } }
     var privacySummary: String {
         switch effectiveRetention {
         case .off: return "On your Mac. No recordings or dictation history saved."
@@ -131,12 +143,15 @@ final class AppModel: ObservableObject {
         if preview { return }
         historyStore = HistoryStore(directory: base.appendingPathComponent("History", isDirectory: true))
         loadHistory()
+        notesStore = NotesStore(directory: base.appendingPathComponent("Notes", isDirectory: true))
+        loadNotes()
         historyTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pruneHistory() }
         }
         shortcut.activationMode = { [weak self] in self?.mode ?? .hold }
         shortcut.onDown = { [weak self] in
             guard let self, !editingShortcut else { return }
+            guard !isRecordingNote else { refuseDictationDuringNote(); return }
             switch gesture.down(mode: mode, isActive: isActive) {
             case .start:
                 startFromCurrentWindow(fromShortcut: true)
@@ -304,6 +319,7 @@ final class AppModel: ObservableObject {
     }
     func start(practice: Bool, fromShortcut: Bool = false) {
         guard !editingShortcut else { return }
+        guard !isRecordingNote else { refuseDictationDuringNote(); return }
         let requestedAt = ContinuousClock.now
         refreshPermissions(mayRegisterShortcut: !fromShortcut)
         guard canStart else {
@@ -408,14 +424,15 @@ final class AppModel: ObservableObject {
 
     func suspendEscapeShortcut() { if !previewMode { shortcut.stopEscapeMonitor() } }
     func resumeEscapeShortcut() {
-        guard !previewMode, isActive || phase == .transcribing else { return }
+        // A long note recording is never canceled by a global Escape.
+        guard !previewMode, !isRecordingNote, isActive || phase == .transcribing else { return }
         shortcut.monitorEscape { [weak self] in self?.cancel(cause: .escape) }
     }
 
     private func startPulse(ring: AudioRing, sampleRate: Double, id: UUID) {
         pulse?.cancel()
         let started = ContinuousClock.now
-        let deadline = started.advanced(by: .seconds(300))
+        let deadline = started.advanced(by: .seconds(CaptureLimits.dictation.totalSeconds))
         pulse = Task { [weak self] in
             var lastSampleCount: UInt64 = 0
             var lastAudioProgress = started
@@ -451,14 +468,21 @@ final class AppModel: ObservableObject {
     func stop() { stop(cause: .stopButton) }
     private func stop(cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
         guard let id = session.id else { return }
-        if phase == .preparing { cancel(cause: cause); return }
+        if phase == .preparing {
+            // Nothing has been heard yet; call the private path directly so a note's cancel→stop routing cannot loop.
+            cancel(reason: isRecordingNote ? "Note recording canceled before it started." : "Canceled. Microphone off.", cause: cause); return
+        }
         guard phase == .recording else { return }
         capture.stop(); pulse?.cancel(); pulse = nil
-        recordStop(cause, hardwareChord: hardwareChord)
+        if !isRecordingNote { recordStop(cause, hardwareChord: hardwareChord) }
         _ = session.stopped(id); playCue(start: false); level = 0; message = "Finishing on this Mac…"; notify(); announce("Recording stopped. Transcribing")
     }
     func cancel() { cancel(cause: .cancelButton) }
-    func cancel(cause: RecordingStopCause) { cancel(reason: "Canceled. Microphone off.", cause: cause) }
+    func cancel(cause: RecordingStopCause) {
+        // Canceling a note recording keeps what was heard: it stops and saves instead.
+        if isRecordingNote, cause != .shutdown { stop(cause: cause); return }
+        cancel(reason: "Canceled. Microphone off.", cause: cause)
+    }
     private func cancel(reason: String, cause: RecordingStopCause) {
         capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
         recordStop(cause)
@@ -544,6 +568,150 @@ final class AppModel: ObservableObject {
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
 
+    // MARK: Voice notes
+
+    @discardableResult func newNote() -> UUID {
+        let note = Note(created: Date())
+        notes.insert(note, at: 0); selectedNoteID = note.id; persistNote(note)
+        return note.id
+    }
+    func updateNote(_ id: UUID, title: String? = nil, body: String? = nil) {
+        guard let index = notes.firstIndex(where: { $0.id == id }) else { return }
+        if let title { notes[index].title = title }
+        if let body { notes[index].body = body }
+        notes[index].modified = Date()
+        persistNote(notes[index])
+    }
+    func deleteNote(_ id: UUID) {
+        guard recordingNoteID != id else { notesMessage = "Stop recording before deleting this note."; return }
+        notes.removeAll { $0.id == id }
+        if selectedNoteID == id { selectedNoteID = notes.first?.id }
+        if !previewMode {
+            do { try notesStore?.delete(id) } catch { notesMessage = "This note couldn’t be deleted from disk." }
+        }
+        announce("Note deleted")
+    }
+    private func refuseDictationDuringNote() {
+        message = "Stop your note recording to dictate."; notify(); announce(message)
+    }
+    private func loadNotes() {
+        guard let notesStore else { return }
+        let loaded = notesStore.loadAll()
+        notes = loaded.notes
+        if loaded.unreadable > 0 { notesMessage = "\(loaded.unreadable) saved note(s) couldn’t be read and were left untouched." }
+    }
+    private func persistNote(_ note: Note) {
+        guard !previewMode, let notesStore else { return }
+        do { try notesStore.save(note); notesMessage = "" }
+        catch { notesMessage = "This note couldn’t be saved on this Mac." }
+    }
+
+    /// Records into one note. Text is committed when recording stops for any reason,
+    /// and a disk checkpoint including confirmed live text is written every ten seconds.
+    func startNoteRecording(_ noteID: UUID) {
+        guard !editingShortcut, !isRecordingNote, notes.contains(where: { $0.id == noteID }) else { return }
+        refreshPermissions(mayRegisterShortcut: true)
+        guard canStart else {
+            notesMessage = phase == .recovery ? "Review your pending dictation first." : modelBusy || workerBusy ? readinessWaitMessage
+                : !modelInstalled || !microphoneAllowed ? "Finish setup before recording." : !selectedInputAvailable ? "Your selected microphone is unavailable." : "Check the local speech model in Settings."
+            announce(notesMessage); return
+        }
+        guard let id = session.begin() else { return }
+        recordingNoteID = noteID; isPracticeSession = false; pendingNoteGap = nil
+        liveConfirmed = ""; liveVolatile = ""; notesMessage = ""
+        target?.stopObserving(); target = nil; fromHoldShortcut = false; audioFlowing = false
+        workerBusy = true; message = "Preparing local speech…"; elapsed = 0; level = 0
+        notify()
+        worker = Task { [weak self] in
+            guard let self else { return }
+            var text = ""
+            do {
+                try await speech.prepare(directory: await store.directory, manifest: manifest)
+                lastModelCheck = "passed"
+                try Task.checkCancellation(); guard session.isCurrent(id) else { throw CancellationError() }
+                try await speech.begin()
+                try Task.checkCancellation(); guard session.isCurrent(id) else { throw CancellationError() }
+                let ring = try capture.start(deviceUID: microphoneUID, limits: .note)
+                let rate = capture.sampleRate
+                guard session.recording(id) else { capture.stop(); throw CancellationError() }
+                message = "Starting microphone…"; notify()
+                startNotePulse(ring: ring, sampleRate: rate, id: id)
+                text = try await speech.consume(ring, sampleRate: rate) { confirmed, volatile in
+                    Task { @MainActor [weak self] in self?.noteLiveUpdate(id: id, noteID: noteID, confirmed: confirmed, volatile: volatile) }
+                }
+                capture.stop(); pulse?.cancel(); pulse = nil
+                if ring.status == 2 { pendingNoteGap = pendingNoteGap ?? "Paused because speech processing fell behind" }
+                if ring.status == 3 { pendingNoteGap = pendingNoteGap ?? "Paused at the recording limit" }
+            } catch {
+                capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil
+                await speech.cancel()
+                if error is IntegrityError { invalidateModelVerification() }
+                if case SpeechFailure.partial(let partial) = error {
+                    text = partial; pendingNoteGap = pendingNoteGap ?? "Paused after a speech processing error"
+                } else if !(error is CancellationError) {
+                    notesMessage = "Recording stopped. Check the microphone and local model, then record again."
+                }
+            }
+            let added = commitNoteRecording(noteID: noteID, text: text)
+            if session.isCurrent(id) { session.finish(id) }
+            recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""; level = 0
+            // Keep a specific reason (canceled, no audio) instead of claiming words were saved.
+            if added { message = "Your note is saved on this Mac."; announce("Note recording stopped and saved") }
+            else if notesMessage.isEmpty && !message.contains("canceled") { message = "No speech was added to the note."; announce(message) }
+            if unloadAfterSession { await speech.unload(); capture.preventReuse(); unloadAfterSession = false }
+            workerBusy = false; worker = nil; notify()
+        }
+    }
+    private func noteLiveUpdate(id: UUID, noteID: UUID, confirmed: String, volatile: String) {
+        guard session.isCurrent(id), recordingNoteID == noteID else { return }
+        liveConfirmed = confirmed; liveVolatile = volatile
+        guard ContinuousClock.now >= lastNoteCheckpoint.advanced(by: .seconds(10)),
+              var checkpoint = notes.first(where: { $0.id == noteID }) else { return }
+        // Disk-only checkpoint so a crash keeps confirmed words; the in-memory body stays the user's.
+        lastNoteCheckpoint = .now
+        checkpoint.body = NoteText.appending(confirmed, to: checkpoint.body)
+        checkpoint.modified = Date()
+        persistNote(checkpoint)
+    }
+    @discardableResult private func commitNoteRecording(noteID: UUID, text: String) -> Bool {
+        guard let index = notes.firstIndex(where: { $0.id == noteID }) else { return false }
+        guard !TranscriptFormatting.clean(text).isEmpty else { pendingNoteGap = nil; return false }
+        var body = NoteText.appending(text, to: notes[index].body)
+        if let gap = pendingNoteGap, !TranscriptFormatting.clean(text).isEmpty { body += "\n\n" + NoteText.gapMarker(reason: gap) }
+        pendingNoteGap = nil
+        notes[index].body = body; notes[index].modified = Date()
+        persistNote(notes[index])
+        return true
+    }
+    private func startNotePulse(ring: AudioRing, sampleRate: Double, id: UUID) {
+        pulse?.cancel()
+        let started = ContinuousClock.now
+        pulse = Task { [weak self] in
+            var lastSampleCount: UInt64 = 0
+            var lastAudioProgress = started
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, session.isCurrent(id), phase == .recording else { return }
+                level = min(1, ring.level * 7); elapsed = Double(ring.samplesCaptured) / sampleRate
+                if ring.samplesCaptured != lastSampleCount { lastSampleCount = ring.samplesCaptured; lastAudioProgress = .now }
+                if !audioFlowing, ring.samplesCaptured > 0 {
+                    audioFlowing = true; message = "Recording your note"; announce("Note recording started"); playCue(start: true)
+                }
+                if !audioFlowing, ContinuousClock.now >= started.advanced(by: .seconds(5)) {
+                    notesMessage = "No audio arrived from the microphone. Check the selected input and try again."
+                    stop(cause: .noAudio); return
+                }
+                if audioFlowing, ContinuousClock.now >= lastAudioProgress.advanced(by: .seconds(5)) {
+                    pendingNoteGap = "Paused because the microphone stopped sending audio"; stop(cause: .audioStalled); return
+                }
+                if AVCaptureDevice.authorizationStatus(for: .audio) != .authorized {
+                    pendingNoteGap = "Paused because microphone access changed"; stop(cause: .microphonePermission); return
+                }
+                if ring.status != 0 { stop(cause: ring.status == 2 ? .bufferOverflow : .durationLimit); return }
+            }
+        }
+    }
+
     func chooseHistoryRetention(_ retention: HistoryRetention) {
         historyRetention = retention
         if !previewMode { UserDefaults.standard.set(retention.rawValue, forKey: "historyRetention") }
@@ -620,6 +788,11 @@ final class AppModel: ObservableObject {
     }
     @objc private func screenLocked() { cancelForBoundary() }
     private func cancelForBoundary() {
+        if isRecordingNote {
+            // Pause and keep: the note keeps its words and a visible gap; Record resumes explicitly.
+            pendingNoteGap = "Paused when the Mac locked or went to sleep"
+            stop(cause: .systemBoundary); requestUnload(); return
+        }
         // Stop audio before querying diagnostic state or invalidating the session.
         capture.stop(reusingStoppedEngine: false)
         recordStop(.systemBoundary)
@@ -683,6 +856,23 @@ final class AppModel: ObservableObject {
         modelBusy = false; workerBusy = false
         mode = .toggle; dictationShortcut = .controlShiftD; microphoneUID = "preview-input"
         historyRetention = nil; history = []
+        notes = []; selectedNoteID = nil; recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""
+        if state == "notes" || state == "note-recording" || state == "note-preparing" {
+            // Synthetic sample notes only; previews never read or write the Notes folder.
+            let now = Date()
+            var plan = Note(title: "Weekend planning", created: now.addingTimeInterval(-3 * 3600), body: "Pick up the bike from the shop on Saturday morning.\n\nAsk whether the Sunday hike still works if it rains. Maybe move it to the afternoon.")
+            plan.modified = now.addingTimeInterval(-20 * 60)
+            var ideas = Note(created: now.addingTimeInterval(-2 * 86_400), body: "Ideas for the onboarding flow: fewer words, show the shortcut as real keys, and let people try it before choosing settings.")
+            ideas.modified = now.addingTimeInterval(-2 * 86_400)
+            notes = [plan, ideas]; selectedNoteID = plan.id
+            if state == "note-preparing" { recordingNoteID = plan.id; _ = session.begin() }
+            if state == "note-recording" {
+                recordingNoteID = plan.id
+                let id = session.begin()!; _ = session.recording(id); elapsed = 83; level = 0.4; audioFlowing = true
+                liveConfirmed = "Also remember to book the table for Friday, somewhere quiet enough to talk,"
+                liveVolatile = "and ask Sam if the"
+            }
+        }
         if state == "history" || state == "history-empty" { historyRetention = .week }
         if state == "history-off" { historyRetention = .off }
         if state == "history" {
