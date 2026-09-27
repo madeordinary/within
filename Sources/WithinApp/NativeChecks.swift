@@ -55,9 +55,9 @@ func nativeChecks(to output: URL) throws {
         && !busy.message.contains("Try again") && !completedPractice.message.contains("Try again")
 
     let routing = fixture("ready")
-    routing.practiceWindowIsActive = { true }
+    routing.practiceAreaIsActive = { true }
     let activeWindowRoutesToPractice = routing.startsInPractice
-    routing.practiceWindowIsActive = { false }
+    routing.practiceAreaIsActive = { false }
     let routingPassed = activeWindowRoutesToPractice && !routing.startsInPractice
     let setup = fixture("setup")
     setup.completeSetup()
@@ -129,8 +129,67 @@ func nativeChecks(to output: URL) throws {
         && !AppDelegate.canHideRecovery(for: otherWindow, recovery: recoveryWindow)
         && !AppDelegate.canHideRecovery(for: nil, recovery: recoveryWindow)
         && !AppDelegate.canHideRecovery(for: otherWindow, recovery: nil)
+
+    let navigation = AppNavigation()
+    let navigationModel = fixture("ready")
+    navigationModel.practiceText = "Synthetic practice retained across pages."
+    func navigate(_ page: AppPage, practice: Bool? = nil, blocked: Bool = false, back: Bool = false) -> Bool {
+        navigation.navigate(to: page, practice: practice, back: back, model: navigationModel,
+            blocked: blocked, confirmPracticeExit: { false })
+    }
+    var navigationPassed = navigate(.home, practice: true)
+        && AppDelegate.practiceIsActive(navigation: navigation, windowIsKey: true, appIsActive: true, hasDialog: false)
+        && !AppDelegate.practiceIsActive(navigation: navigation, windowIsKey: false, appIsActive: true, hasDialog: false)
+        && !AppDelegate.practiceIsActive(navigation: navigation, windowIsKey: true, appIsActive: false, hasDialog: false)
+        && !AppDelegate.practiceIsActive(navigation: navigation, windowIsKey: true, appIsActive: true, hasDialog: true)
+    navigationPassed = !navigate(.settings, blocked: true) && navigation.page == .home && navigationPassed
+    _ = navigationModel.beginShortcutEditing()
+    navigationPassed = !navigate(.help) && navigation.page == .home && navigationPassed
+    navigationModel.endShortcutEditing()
+    navigationPassed = navigate(.settings) && !AppDelegate.practiceIsActive(navigation: navigation,
+        windowIsKey: true, appIsActive: true, hasDialog: false) && navigationPassed
+    navigationPassed = navigate(.help) && navigation.backDestination == .settings && navigationPassed
+    navigationPassed = navigate(navigation.backDestination, back: true) && navigation.page == .settings && navigationPassed
+    navigationPassed = navigate(.home, practice: false) && !navigation.showsPractice && navigationPassed
+    navigationPassed = navigate(.setup) && navigationPassed
+    navigation.setupStep = 3
+    navigationPassed = navigate(.settings) && navigate(navigation.backDestination, back: true)
+        && navigation.page == .setup && navigation.setupStep == 3 && navigationPassed
+    navigationPassed = navigationModel.phase == .ready && !navigationModel.workerBusy
+        && navigationModel.practiceText == "Synthetic practice retained across pages." && navigationPassed
+
+    let leavingPractice = fixture("practice-recording")
+    let practiceNavigation = AppNavigation()
+    _ = practiceNavigation.navigate(to: .home, practice: true, model: leavingPractice, blocked: false, confirmPracticeExit: { false })
+    let stayedInPractice = !practiceNavigation.navigate(to: .settings, model: leavingPractice, blocked: false, confirmPracticeExit: { false })
+        && practiceNavigation.showsPractice && leavingPractice.phase == .recording
+    let canceledOnCollapse = practiceNavigation.navigate(to: .home, practice: false, model: leavingPractice, blocked: false, confirmPracticeExit: { true })
+        && !practiceNavigation.showsPractice && leavingPractice.phase == .ready
+    let completingPractice = fixture("practice-transcribing")
+    let recoveredDuringAlert = !practiceNavigation.allowPracticeExit(model: completingPractice) {
+        completingPractice.cancel(); completingPractice.configurePreview("practice-recovery"); return true
+    } && completingPractice.phase == .recovery && !completingPractice.pendingText.isEmpty
+    completingPractice.cancel(); completingPractice.configurePreview("practice-recording")
+    let laterSessionKept = !practiceNavigation.allowPracticeExit(model: completingPractice) {
+        completingPractice.cancel(); completingPractice.configurePreview("practice-recording"); return true
+    } && completingPractice.phase == .recording
+    let completedDuringAlert = practiceNavigation.allowPracticeExit(model: completingPractice) {
+        completingPractice.cancel(); completingPractice.configurePreview("practice-unloading"); return true
+    } && completingPractice.phase == .ready && completingPractice.workerBusy
+    let practiceNavigationPassed = stayedInPractice && canceledOnCollapse && recoveredDuringAlert && laterSessionKept && completedDuringAlert
+
+    let recoveryNavigation = AppNavigation()
+    let pending = fixture("recovery")
+    let pendingWords = pending.pendingText
+    var recoveryNavigationPassed = true
+    for page: AppPage in [.recovery, .home, .settings, .help, .recovery] {
+        recoveryNavigationPassed = recoveryNavigation.navigate(to: page, model: pending, blocked: false, confirmPracticeExit: { false })
+            && pending.pendingText == pendingWords && pending.phase == .recovery && !pending.canStart && recoveryNavigationPassed
+    }
+    recoveryNavigation.recoveryDismissed()
+    recoveryNavigationPassed = recoveryNavigation.page == .home && pending.pendingText == pendingWords && recoveryNavigationPassed
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
-    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed
+    let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
     defer { board.releaseGlobally() }
     board.clearContents()
@@ -168,6 +227,9 @@ func nativeChecks(to output: URL) throws {
         "modifierSideEventFlagsPassed": modifierSidePassed,
         "syntheticShortcutRecorderEventsPassed": recorderEventsPassed,
         "reopenAndNavigationPreserveSheetPassed": sheetRoutingPassed,
+        "singleWindowNavigationWithoutRecordingPassed": navigationPassed,
+        "practiceExitConfirmationAndRacesPassed": practiceNavigationPassed,
+        "navigationPreservesPendingWordsPassed": recoveryNavigationPassed,
         "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed,
         "notTested": ["physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)

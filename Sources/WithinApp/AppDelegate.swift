@@ -5,14 +5,11 @@ import Darwin
 import Carbon
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSToolbarDelegate, NSToolbarItemValidation {
     private var model: AppModel!
     private var mainWindow: NSWindow?
-    private var settingsWindow: NSWindow?
-    private var setupWindow: NSWindow?
-    private var practiceWindow: NSWindow?
-    private var helpWindow: NSWindow?
-    private var recoveryWindow: NSWindow?
+    private let navigation = AppNavigation()
+    private var deferredRecovery = false
     private var pill: NSPanel?
     private var statusItem: NSStatusItem?
     private var actionItem: NSMenuItem?
@@ -39,24 +36,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
             model.showHelp = { [weak self] in self?.showHelpWindow() }
             model.showSetup = { [weak self] in self?.showSetupWindow() }
             model.showPractice = { [weak self] in self?.showPracticeWindow() }
-            model.practiceWindowIsActive = { [weak self] in NSApp.isActive && self?.practiceWindow?.isKeyWindow == true }
+            model.practiceAreaIsActive = { [weak self] in
+                guard let self else { return false }
+                return Self.practiceIsActive(navigation: navigation, windowIsKey: mainWindow?.isKeyWindow == true,
+                    appIsActive: NSApp.isActive, hasDialog: navigationBlocked)
+            }
             model.showRecovery = { [weak self] in self?.showRecoveryWindow() }
-            model.dismissRecovery = { [weak self] in self?.recoveryWindow?.orderOut(nil) }
+            model.dismissRecovery = { [weak self] in self?.dismissRecovery() }
             model.stateChanged = { [weak self] in self?.refreshStatus() }
             makeMenu()
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
                 guard event.keyCode == 53, let self, self.model.phase != .ready else { return event }
                 guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return event }
                 if self.model.phase == .recovery {
-                    guard Self.canHideRecovery(for: event.window, recovery: self.recoveryWindow) else { return event }
-                    self.recoveryWindow?.orderOut(nil)
+                    guard self.navigation.page == .recovery,
+                          Self.canHideRecovery(for: event.window, recovery: self.mainWindow) else { return event }
+                    self.mainWindow?.orderOut(nil)
                 }
                 else { self.model.cancel(cause: .escape) }
                 return nil
             }
             refreshStatus()
             let loginLaunch = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(keyAELaunchedAsLogInItem)) != nil
-            if !loginLaunch || !model.setupComplete { showMainWindow() }
+            if !model.setupComplete { showSetupWindow() }
+            else if !loginLaunch { showMainWindow() }
         } catch {
             let alert = NSAlert(); alert.messageText = "Within couldn’t start."; alert.informativeText = "The app resources or local support folder are unavailable. Rebuild or reinstall the app and try again."; alert.runModal()
             NSApp.terminate(nil)
@@ -154,7 +157,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func present(_ window: NSWindow?) {
         model.refreshPermissions()
-        let destination = Self.presentationWindow(requested: window, windows: NSApp.orderedWindows)
+        let destination = NSApp.modalWindow ?? Self.presentationWindow(requested: window, windows: NSApp.orderedWindows)
         let parent = destination?.sheetParent ?? destination
         if parent?.isMiniaturized == true { parent?.deminiaturize(nil) }
         NSApp.activate(ignoringOtherApps: true)
@@ -170,51 +173,83 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
         return destination
     }
     private func showMainWindow() {
-        guard model != nil else { return }
+        navigate(to: .home)
+    }
+    private func ensureMainWindow() {
         if mainWindow == nil {
-            let window = makeWindow("Within", size: NSSize(width: 560, height: 570), minimum: NSSize(width: 530, height: 540), autosave: "Within.Home.v2", view: MainView(model: model))
+            let window = makeWindow("Within", size: NSSize(width: 660, height: 720), minimum: NSSize(width: 620, height: 640), autosave: "Within.Main.v3",
+                view: AppWindowView(model: model, navigation: navigation, togglePractice: { [weak self] expanded in
+                    self?.navigate(to: .home, practice: expanded)
+                }))
             let toolbar = NSToolbar(identifier: "Within.HomeToolbar"); toolbar.delegate = self
             toolbar.displayMode = .iconOnly; toolbar.allowsUserCustomization = false
             window.toolbar = toolbar; window.toolbarStyle = .unified
             mainWindow = window
         }
-        present(mainWindow)
     }
     private func showSettingsWindow(section: String? = nil) {
-        if let section { model.settingsSection = section }
-        if settingsWindow == nil {
-            settingsWindow = makeWindow("Within Settings", size: NSSize(width: 640, height: 630), minimum: NSSize(width: 620, height: 590), autosave: "Within.Settings.v2", view: SettingsView(model: model))
-        }
-        present(settingsWindow)
+        if navigate(to: .settings), let section { model.settingsSection = section }
     }
-    private func showHelpWindow() {
-        if helpWindow == nil {
-            helpWindow = makeWindow("Within Help", size: NSSize(width: 600, height: 590), minimum: NSSize(width: 560, height: 520), autosave: "Within.Help.v2", view: HelpView(model: model))
-        }
-        present(helpWindow)
+    private func showHelpWindow() { navigate(to: .help) }
+    private func showSetupWindow() { navigate(to: .setup) }
+    private func showPracticeWindow() { navigate(to: .home, practice: true) }
+    @objc private func goBack() { navigate(to: navigation.backDestination, back: true) }
+
+    private var navigationBlocked: Bool { NSApp.modalWindow != nil || mainWindow?.attachedSheet != nil }
+    static func practiceIsActive(navigation: AppNavigation, windowIsKey: Bool, appIsActive: Bool, hasDialog: Bool) -> Bool {
+        navigation.showsPractice && windowIsKey && appIsActive && !hasDialog
     }
-    private func showSetupWindow() {
-        if setupWindow == nil {
-            setupWindow = makeWindow("Set Up Within", size: NSSize(width: 540, height: 650), minimum: NSSize(width: 540, height: 600), autosave: "Within.Setup.v3", view: SetupView(model: model, done: { [weak self] in self?.setupWindow?.close() }))
-        }
-        present(setupWindow)
+
+    @discardableResult
+    private func navigate(to page: AppPage, practice: Bool? = nil, back: Bool = false) -> Bool {
+        guard model != nil else { return false }
+        ensureMainWindow()
+        let changed = navigation.navigate(to: page, practice: practice, back: back, model: model,
+            blocked: navigationBlocked, confirmPracticeExit: confirmPracticeExit)
+        if !changed, page == .recovery, model.phase == .recovery { deferredRecovery = true }
+        updateWindowChrome()
+        present(mainWindow)
+        return changed
     }
-    private func showPracticeWindow() {
-        if practiceWindow == nil {
-            practiceWindow = makeWindow("Practice · Within", size: NSSize(width: 600, height: 510), minimum: NSSize(width: 560, height: 500), autosave: "Within.Practice.v2", view: PracticeView(model: model, done: { [weak self] in self?.practiceWindow?.performClose(nil) }))
+    private func updateWindowChrome() {
+        switch navigation.page {
+        case .home: mainWindow?.title = "Within"
+        case .settings: mainWindow?.title = "Settings · Within"
+        case .help: mainWindow?.title = "Help · Within"
+        case .setup: mainWindow?.title = "Set Up Within"
+        case .recovery: mainWindow?.title = "Your words · Within"
         }
-        present(practiceWindow)
+        mainWindow?.toolbar?.validateVisibleItems()
+    }
+    func windowDidEndSheet(_ notification: Notification) {
+        DispatchQueue.main.async { [weak self] in self?.presentDeferredRecovery() }
+    }
+    private func presentDeferredRecovery() {
+        guard deferredRecovery, !navigationBlocked, !model.editingShortcut else { return }
+        deferredRecovery = false
+        if model.phase == .recovery { showRecoveryWindow() }
+    }
+    private func dismissRecovery() {
+        deferredRecovery = false
+        if model.phase == .recovery {
+            // Lock/sleep hides pending words without dropping the session.
+            mainWindow?.orderOut(nil)
+            navigation.recoveryDismissed()
+        } else if navigation.page == .recovery {
+            navigation.recoveryDismissed()
+        }
+        updateWindowChrome()
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard sender === practiceWindow, model.hasActivePracticeSession else { return true }
-        let closingSessionID = model.session.id
+        guard sender === mainWindow else { return true }
+        guard !navigationBlocked, !model.editingShortcut else { present(mainWindow); return false }
+        return navigation.allowPracticeExit(model: model, confirm: confirmPracticeExit)
+    }
+    private func confirmPracticeExit() -> Bool {
         let alert = NSAlert(); alert.messageText = "Cancel this practice recording?"
-        alert.informativeText = "Closing now cancels the current recording or transcription. Earlier practice text stays available until you clear it or quit."
-        alert.addButton(withTitle: "Keep practicing"); alert.addButton(withTitle: "Cancel and close")
-        guard runConfirmation(alert) == .alertSecondButtonReturn else { return false }
-        // The worker can finish while a native confirmation is open.
-        if model.shouldCancelPracticeOnClose(sessionID: closingSessionID) { model.cancel() }
-        return true
+        alert.informativeText = "Leaving practice cancels the current recording or transcription. Earlier practice text stays available until you clear it or quit."
+        alert.addButton(withTitle: "Keep practicing"); alert.addButton(withTitle: "Cancel and leave")
+        return runConfirmation(alert) == .alertSecondButtonReturn
     }
     static func canHideRecovery(for eventWindow: NSWindow?, recovery: NSWindow?) -> Bool {
         guard let recovery, eventWindow === recovery, recovery.attachedSheet == nil else { return false }
@@ -222,12 +257,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func runConfirmation(_ alert: NSAlert) -> NSApplication.ModalResponse {
         model.suspendEscapeShortcut()
-        defer { model.resumeEscapeShortcut() }
+        defer {
+            model.resumeEscapeShortcut()
+            DispatchQueue.main.async { [weak self] in self?.presentDeferredRecovery() }
+        }
         return alert.runModal()
     }
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { toolbarDefaultItemIdentifiers(toolbar) }
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace, .init("Within.Help"), .init("Within.Settings")] }
+    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+        item.itemIdentifier.rawValue != "Within.Back" || navigation.page != .home
+    }
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.init("Within.Back"), .flexibleSpace, .init("Within.Help"), .init("Within.Settings")] }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if identifier.rawValue == "Within.Back" {
+            let item = NSToolbarItem(itemIdentifier: identifier)
+            item.label = "Back"; item.toolTip = "Back"
+            item.image = NSImage(systemSymbolName: "chevron.left", accessibilityDescription: "Back")
+            item.target = self; item.action = #selector(goBack); item.isBordered = true
+            return item
+        }
         guard identifier.rawValue == "Within.Help" || identifier.rawValue == "Within.Settings" else { return nil }
         let help = identifier.rawValue == "Within.Help"
         let item = NSToolbarItem(itemIdentifier: identifier)
@@ -238,13 +286,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTo
     }
     private func showRecoveryWindow() {
         guard model.phase == .recovery else { return }
-        if recoveryWindow == nil {
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 620, height: 500), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            window.minSize = NSSize(width: 605, height: 475); window.title = "Your words · Within"; window.isReleasedWhenClosed = false; window.level = .floating
-            window.contentView = NSHostingView(rootView: RecoveryView(model: model)); window.center(); window.delegate = self
-            recoveryWindow = window
-        }
-        NSApp.activate(ignoringOtherApps: true); recoveryWindow?.makeKeyAndOrderFront(nil)
+        navigate(to: .recovery)
     }
     private func refreshStatus() {
         let active = model.phase == .preparing || model.phase == .recording || model.phase == .transcribing

@@ -79,7 +79,7 @@ final class AppModel: ObservableObject {
     var showHelp: (() -> Void)?
     var showSetup: (() -> Void)?
     var showPractice: (() -> Void)?
-    var practiceWindowIsActive: (() -> Bool)?
+    var practiceAreaIsActive: (() -> Bool)?
     var showRecovery: (() -> Void)?
     var dismissRecovery: (() -> Void)?
 
@@ -96,7 +96,7 @@ final class AppModel: ObservableObject {
     var canReturn: Bool { recoveryReason?.permitsReturn == true && target != nil && !returning }
     var isActive: Bool { phase == .preparing || phase == .recording }
     var hasActivePracticeSession: Bool { isPracticeSession && (isActive || phase == .transcribing) }
-    var startsInPractice: Bool { practiceWindowIsActive?() == true }
+    var startsInPractice: Bool { practiceAreaIsActive?() == true }
     func shouldCancelPracticeOnClose(sessionID: UUID?) -> Bool {
         guard let sessionID else { return false }
         return hasActivePracticeSession && session.isCurrent(sessionID)
