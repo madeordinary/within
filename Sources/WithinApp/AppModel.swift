@@ -86,6 +86,7 @@ final class AppModel: ObservableObject {
     private var historyTimer: Timer?
     private var notesStore: NotesStore?
     private var pendingNoteGap: String?
+    private var noteSaveTasks: [UUID: Task<Void, Never>] = [:]
     private var lastNoteCheckpoint = ContinuousClock.now
     var stateChanged: (() -> Void)?
     var showMain: (() -> Void)?
@@ -580,10 +581,34 @@ final class AppModel: ObservableObject {
         if let title { notes[index].title = title }
         if let body { notes[index].body = body }
         notes[index].modified = Date()
-        persistNote(notes[index])
+        scheduleNoteSave(id)
+    }
+    /// Typing saves about a second after the last change instead of on every keystroke.
+    private func scheduleNoteSave(_ id: UUID) {
+        noteSaveTasks[id]?.cancel()
+        noteSaveTasks[id] = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self else { return }
+            noteSaveTasks[id] = nil
+            if let note = notes.first(where: { $0.id == id }) { persistEdited(note) }
+        }
+    }
+    /// While recording, an edit save keeps the confirmed live words so it never undoes a checkpoint.
+    private func persistEdited(_ note: Note) {
+        var copy = note
+        if recordingNoteID == note.id, !liveConfirmed.isEmpty { copy.body = NoteText.appending(liveConfirmed, to: note.body) }
+        persistNote(copy)
+    }
+    func flushNoteEdits() {
+        for (id, task) in noteSaveTasks {
+            task.cancel()
+            if let note = notes.first(where: { $0.id == id }) { persistEdited(note) }
+        }
+        noteSaveTasks.removeAll()
     }
     func deleteNote(_ id: UUID) {
         guard recordingNoteID != id else { notesMessage = "Stop recording before deleting this note."; return }
+        noteSaveTasks[id]?.cancel(); noteSaveTasks[id] = nil
         notes.removeAll { $0.id == id }
         if selectedNoteID == id { selectedNoteID = notes.first?.id }
         if !previewMode {
@@ -657,7 +682,10 @@ final class AppModel: ObservableObject {
             recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""; level = 0
             // Keep a specific reason (canceled, no audio) instead of claiming words were saved.
             if added { message = "Your note is saved on this Mac."; announce("Note recording stopped and saved") }
-            else if notesMessage.isEmpty && !message.contains("canceled") { message = "No speech was added to the note."; announce(message) }
+            else if !message.localizedCaseInsensitiveContains("canceled") {
+                message = notesMessage.isEmpty ? "No speech was added to the note." : "Note recording stopped. Microphone off."
+                announce(notesMessage.isEmpty ? message : notesMessage)
+            }
             if unloadAfterSession { await speech.unload(); capture.preventReuse(); unloadAfterSession = false }
             workerBusy = false; worker = nil; notify()
         }
@@ -675,6 +703,7 @@ final class AppModel: ObservableObject {
     }
     @discardableResult private func commitNoteRecording(noteID: UUID, text: String) -> Bool {
         guard let index = notes.firstIndex(where: { $0.id == noteID }) else { return false }
+        noteSaveTasks[noteID]?.cancel(); noteSaveTasks[noteID] = nil
         guard !TranscriptFormatting.clean(text).isEmpty else { pendingNoteGap = nil; return false }
         var body = NoteText.appending(text, to: notes[index].body)
         if let gap = pendingNoteGap, !TranscriptFormatting.clean(text).isEmpty { body += "\n\n" + NoteText.gapMarker(reason: gap) }
@@ -914,5 +943,5 @@ final class AppModel: ObservableObject {
         }
         notify()
     }
-    func shutdown() { cancel(cause: .shutdown); modelTask?.cancel(); shortcut.shutdown() }
+    func shutdown() { flushNoteEdits(); cancel(cause: .shutdown); modelTask?.cancel(); shortcut.shutdown() }
 }
