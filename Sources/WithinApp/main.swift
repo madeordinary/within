@@ -45,6 +45,11 @@ if CommandLine.arguments.contains("--speech-safety-check") {
 } else if CommandLine.arguments.contains("--model-store-check") {
     Task { await modelStoreCheck() }
     dispatchMain()
+} else if CommandLine.arguments.contains("--audio-processes") {
+    audioProcessList()
+} else if CommandLine.arguments.contains("--app-audio-tap-fixture") {
+    if #available(macOS 14.2, *) { Task { await appAudioTapFixture() }; dispatchMain() }
+    else { print("App-audio taps need macOS 14.2 or later."); exit(2) }
 } else if CommandLine.arguments.contains("--live-text-benchmark") {
     Task { await liveTextBenchmark() }
     dispatchMain()
