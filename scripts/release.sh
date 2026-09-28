@@ -46,8 +46,8 @@ Install or update
 4. Allow Microphone and Accessibility if asked.
 
 From build 14 on, each build is signed with the same Made Ordinary certificate,
-so updates should keep the permissions you've allowed. Coming from build 13 or earlier,
-macOS asks for Accessibility once more.
+so updates keep the permissions you've allowed. Coming from build 13 or
+earlier, macOS asks for Accessibility once more.
 
 Your settings, history and notes are kept in ~/Library/Application Support/Within
 and stay when you replace the app. Audio is never saved.

@@ -32,7 +32,7 @@ cd within
 open build/Within.app
 ```
 
-The scripts fetch a pinned FluidAudio source revision, apply the checked-in patch, and build locally. Dependency preparation requires network access. The default app signature is ad hoc; it does not establish a trusted distribution identity. Model weights are downloaded separately after choosing **Download local model** in the app.
+The scripts fetch a pinned FluidAudio source revision, apply the checked-in patch, and build locally. Dependency preparation requires network access. Builds are signed ad hoc unless the maintainer's self-signed "Within Signing" certificate is in the keychain; neither is an Apple-trusted distribution identity. Model weights are downloaded separately after choosing **Download local model** in the app.
 
 Granting Microphone permission does not start recording. Practice and explicit Copy work without Accessibility permission; direct insertion requires it. Home and setup include a microphone selector. The default shortcut is Control–Shift–Space; choose **Change…** on Home, in setup or Settings to record another combination or a single left/right modifier, including Right Control. Modifier-only shortcuts require Accessibility for use in other apps. Shortcut editing never starts dictation. Compatibility paste is experimental and off by default.
 
@@ -46,7 +46,7 @@ After building, you can copy `build/Within.app` into Applications for a stable l
 
 ## Updates
 
-Test builds are published as GitHub pre-releases tagged `v<version>-build<number>`. Choose **Check for Updates…** in the Within menu, or turn on the weekly check in setup or Settings → About. It is off unless you choose it. A check asks GitHub for this repository's release list and sends no dictation, notes or usage data. To update, quit Within, download the new DMG and replace the app; settings, history and notes stay. Until builds are signed with a Developer ID, macOS asks you to confirm each new copy with Open Anyway, and you may need to allow Accessibility again.
+Test builds are published as GitHub pre-releases tagged `v<version>-build<number>`. Choose **Check for Updates…** in the Within menu, or turn on the weekly check in setup or Settings → About. It is off unless you choose it. A check asks GitHub for this repository's release list and sends no dictation, notes or usage data. To update, quit Within, download the new DMG and replace the app; settings, history and notes stay. Test builds from 14 on are signed with the same self-signed Made Ordinary certificate, so updates keep the permissions you've allowed; updating from build 13 or earlier asks for Accessibility once more. Until builds are signed with a Developer ID, macOS may ask you to confirm a new copy with Open Anyway.
 
 Maintainers build a candidate with `./scripts/release.sh`. It runs the tests and checks, then writes the DMG, checksums and draft notes under `build/release/`. It never uploads; publishing is a separate `gh release create` step.
 
