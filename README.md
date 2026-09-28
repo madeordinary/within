@@ -6,7 +6,7 @@
 
 Native macOS dictation with on-device transcription and explicit control over recording, insertion, and copying.
 
-**Engineering preview.** This repository contains source for contributors. It is not a signed, notarized public release. Cross-app compatibility, accessibility, and supported-system validation are still pending; see [validation](docs/VALIDATION.md).
+**Engineering preview.** Test builds are signed with Made Ordinary's own certificate but not yet notarized by Apple, so macOS asks you to confirm the first open. Cross-app compatibility, accessibility, and supported-system validation are still pending; see [validation](docs/VALIDATION.md).
 
 “Nothing crosses a boundary without your choice.”
 
@@ -19,6 +19,16 @@ Native macOS dictation with on-device transcription and explicit control over re
 - Optional: mute your Mac's sound while you dictate (for example over YouTube or music); calls are never muted.
 
 See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
+
+## Download
+
+1. Go to [Releases](https://github.com/madeordinary/within/releases) and open the newest build at the top, marked **Pre-release**.
+2. Under **Assets**, download `Within-<version>-build<number>.dmg`. Skip the **Source code** links.
+3. Open the DMG and drag **Within** into **Applications**.
+4. Open Within. macOS says it can't verify Within and shows only **Move to Trash** and **Done**, because Apple hasn't notarized these test builds yet. Choose **Done**, then open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to the message about Within. Confirm with your password or Touch ID. If the button isn't there, open Within again first. On macOS 14 you can instead Control-click Within in Applications and choose **Open**.
+5. Allow Microphone and Accessibility when Within asks.
+
+Within needs a Mac with Apple silicon (M1 or later) and macOS 14 or later. To update later, see [Updates](#updates).
 
 ## Build and test
 

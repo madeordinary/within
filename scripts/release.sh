@@ -41,8 +41,10 @@ Requirements: a Mac with Apple silicon (M1 or later), macOS 14 or later.
 Install or update
 1. Quit Within if it is running.
 2. Drag Within into the Applications folder (replace the old copy).
-3. Open Within. If macOS says it can't verify the app, click Done, then open
-   System Settings > Privacy & Security and click "Open Anyway".
+3. Open Within. macOS says it can't verify the app and offers only Move to
+   Trash and Done. Click Done, then open System Settings > Privacy & Security,
+   scroll to Security and click "Open Anyway" next to the message about
+   Within. Confirm with your password or Touch ID.
 4. Allow Microphone and Accessibility if asked.
 
 From build 14 on, each build is signed with the same Made Ordinary certificate,
@@ -71,6 +73,8 @@ if [ -n "$previous" ]; then git log --format='- %s' "${previous}..HEAD"; else gi
   echo "What's new: REPLACE with the changes people will notice, in plain words."
   echo
   echo "To update: quit Within, drag the new Within into Applications, then open it. Your settings, history and notes stay."
+  echo
+  echo "First time installing? Steps: https://github.com/madeordinary/within#download"
 } > "$out/release-notes.md"
 echo "Release candidate ready in $out (not published)."
 echo "Write What's new in release-notes.md (changes.txt lists the commits), then publish only when approved:"
