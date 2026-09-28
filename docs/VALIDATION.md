@@ -11,7 +11,7 @@ python3 -m unittest discover -s Tests/Tooling -p 'test_*.py'
 python3 scripts/publication_policy.py --all-history
 ```
 
-The app test script runs deterministic core tests, including notes, history and meeting-detection rules, and the C audio-ring stress check under ThreadSanitizer. Developer fixture commands (`--long-session-soak`, `--live-text-benchmark`, `--app-audio-tap-fixture`, `--two-stream-meeting-fixture`) measure long sessions, live-text latency and per-app capture with synthetic audio only. The build script makes and verifies a locally signed app bundle. Publication tests check repository/package boundaries. None of these commands is evidence of live cross-app insertion or a notarized release.
+The app test script runs deterministic core tests, including notes, history and meeting-detection rules, and the C audio-ring stress check under ThreadSanitizer. Developer fixture commands (`--long-session-soak`, `--live-text-benchmark`, `--app-audio-tap-fixture`, `--two-stream-meeting-fixture`, `--apple-speech-benchmark`) measure long sessions, live-text latency, per-app capture and an Apple on-device speech comparison with synthetic audio only. `--meeting-tap-probe` is a live check during a real call and is not an automated test. The build script makes and verifies a locally signed app bundle. Publication tests check repository/package boundaries. None of these commands is evidence of live cross-app insertion or a notarized release.
 
 ## Required hands-on validation
 

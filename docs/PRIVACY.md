@@ -39,6 +39,8 @@ The app contains building blocks for a future Meetings space. **No meeting captu
 
 These paths are reachable only through developer commands:
 - `--audio-processes` prints the bundle IDs of apps with audio sessions and whether each is using input or output. It prints to the terminal only and reads no window titles, audio or call content.
+- `--meeting-tap-probe` is a live check for a call you are in. It lists the named meeting app's audio processes, then taps that app's audio **unmuted** for the seconds you give. You keep hearing the call. It transcribes locally and writes the transcript only to the report you name; audio is never saved. Run it only in a call where everyone knows.
+- `--apple-speech-benchmark` transcribes synthetic fixture audio with Apple's on-device speech framework (macOS 26+) for comparison. It never downloads speech assets unless you pass `allow-asset-download`.
 - `--app-audio-tap-fixture` and `--two-stream-meeting-fixture` play synthetic fixture audio through `afplay` and tap only that process. The tap is muted, so nothing is heard. Those fixtures transcribe locally, save nothing, and write only the report you name.
 
 Because the app binary contains the tap, `Info.plist` declares a system-audio capture usage description. macOS asks for System Audio Recording permission only when a tap actually runs, which today means one of those developer commands. Any future Meetings feature will document its own consent, detection, capture and storage behavior here before it ships.

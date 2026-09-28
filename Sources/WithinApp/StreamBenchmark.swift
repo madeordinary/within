@@ -478,3 +478,49 @@ func twoStreamMeetingFixture() async {
         report["error"] = "\(type(of: error))"; print("Two-stream meeting fixture failed."); finish(1)
     }
 }
+
+/// Developer-only live probe for a real call: lists the meeting app's audio processes, then
+/// taps them **unmuted** (the call stays audible) for a few seconds and transcribes locally.
+/// Saves only the named report; audio is never written.
+@available(macOS 14.2, *)
+func meetingTapProbe() async {
+    let args = CommandLine.arguments
+    guard args.count == 6, let seconds = Double(args[4]) else {
+        print("Usage: Within --meeting-tap-probe model-directory bundle-prefix seconds output-json"); exit(2)
+    }
+    var report: [String: Any] = ["liveProbe": true, "bundlePrefix": args[3], "muted": false]
+    let output = URL(fileURLWithPath: args[5])
+    func finish(_ code: Int32) -> Never {
+        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+    }
+    do {
+        let objects = AppAudioTap.processObjects(bundlePrefixes: [args[3]])
+        report["processes"] = objects.map { object -> [String: Any] in
+            ["bundleID": AppAudioTap.bundleID(of: object) ?? "",
+             "runningInput": (audioProperty(object, kAudioProcessPropertyIsRunningInput, UInt32(0)) ?? 0) == 1,
+             "runningOutput": (audioProperty(object, kAudioProcessPropertyIsRunningOutput, UInt32(0)) ?? 0) == 1]
+        }
+        guard !objects.isEmpty else { report["error"] = "no audio process for that app"; finish(1) }
+        let speech = LocalSpeech()
+        try await speech.prepare(directory: URL(fileURLWithPath: args[2]), manifest: try loadManifest())
+        try await speech.beginStream("others")
+        let tap = AppAudioTap()
+        let ring = try tap.start(processes: objects, mute: .unmuted, limits: .note)
+        let rate = tap.sampleRate
+        let recognition = Task { try await speech.consumeStream("others", ring: ring, sampleRate: rate) }
+        try await Task.sleep(for: .seconds(seconds))
+        let captured = Double(ring.samplesCaptured) / rate
+        let energy = ring.meanEnergy
+        tap.stop()
+        let text = try await recognition.value
+        await speech.unload()
+        report["capturedSeconds"] = captured
+        report["captureMeanEnergy"] = energy
+        report["silent"] = energy < 0.0000002
+        report["words"] = text.split(separator: " ").count
+        report["transcript"] = text
+        print("Meeting tap probe completed."); finish(0)
+    } catch {
+        report["error"] = "\(error)"; print("Meeting tap probe failed."); finish(1)
+    }
+}

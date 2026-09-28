@@ -45,6 +45,12 @@ if CommandLine.arguments.contains("--speech-safety-check") {
 } else if CommandLine.arguments.contains("--model-store-check") {
     Task { await modelStoreCheck() }
     dispatchMain()
+} else if CommandLine.arguments.contains("--apple-speech-status") {
+    if #available(macOS 26.0, *) { Task { await appleSpeechStatus() }; dispatchMain() } else { print("Needs macOS 26."); exit(2) }
+} else if CommandLine.arguments.contains("--apple-speech-benchmark") {
+    if #available(macOS 26.0, *) { Task { await appleSpeechBenchmark() }; dispatchMain() } else { print("Needs macOS 26."); exit(2) }
+} else if CommandLine.arguments.contains("--meeting-tap-probe") {
+    if #available(macOS 14.2, *) { Task { await meetingTapProbe() }; dispatchMain() } else { print("Needs macOS 14.2."); exit(2) }
 } else if CommandLine.arguments.contains("--audio-processes") {
     audioProcessList()
 } else if CommandLine.arguments.contains("--app-audio-tap-fixture") {

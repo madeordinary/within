@@ -26,6 +26,7 @@ README.md
 Sources/WithinApp/AccessibilityTarget.swift
 Sources/WithinApp/AppAudioTap.swift
 Sources/WithinApp/AppDelegate.swift
+Sources/WithinApp/AppleSpeechBenchmark.swift
 Sources/WithinApp/AppModel.swift
 Sources/WithinApp/DesignSystem.swift
 Sources/WithinApp/HistoryStore.swift
