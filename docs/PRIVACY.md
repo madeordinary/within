@@ -45,6 +45,15 @@ These paths are reachable only through developer commands:
 
 Because the app binary contains the tap, `Info.plist` declares a system-audio capture usage description. macOS asks for System Audio Recording permission only when a tap actually runs, which today means one of those developer commands. Any future Meetings feature will document its own consent, detection, capture and storage behavior here before it ships.
 
+## Mute while dictating (optional)
+
+**Settings → Audio → Mute this Mac's sound while dictating** is off unless you turn it on. When it is on and a dictation recording starts, Within:
+1. asks Core Audio which apps are playing sound or using a microphone (bundle IDs and running flags only, with no audio and no window or media titles);
+2. mutes your default output device only if another app is playing and no other app, such as a call, is using a microphone;
+3. unmutes that same device when recording stops, is canceled or fails, and on lock, sleep or quit, unless you already unmuted it.
+
+Other apps keep playing silently, and Within's own start and stop sounds are muted too. Within saves only which device it muted and when. If Within quits unexpectedly, it unmutes that device at the next launch within 10 minutes; this is best effort. Within does not pause or control other apps' playback.
+
 ## Insertion and clipboard
 
 Direct insertion requires Accessibility permission and sets selected text on the original control. The app retains target identities without reading destination text, selected text, document contents, or window titles. It refuses secure or unknown targets and rechecks focus and permissions before writing. It never synthesizes Return or Send. Uncertain writes are not automatically retried.

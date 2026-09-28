@@ -79,11 +79,14 @@ public struct MeetingApp: Equatable, Hashable, Sendable {
     public func matches(_ bundleID: String) -> Bool { bundlePrefixes.contains { bundleID.hasPrefix($0) } }
 }
 
-/// An audio client seen by Core Audio: bundle ID and whether it is capturing input.
+/// An audio client seen by Core Audio: bundle ID and whether it is capturing input or playing output.
 public struct AudioClientSnapshot: Equatable, Sendable {
     public let bundleID: String
     public let runningInput: Bool
-    public init(bundleID: String, runningInput: Bool) { self.bundleID = bundleID; self.runningInput = runningInput }
+    public let runningOutput: Bool
+    public init(bundleID: String, runningInput: Bool, runningOutput: Bool = false) {
+        self.bundleID = bundleID; self.runningInput = runningInput; self.runningOutput = runningOutput
+    }
 }
 
 public enum MeetingDetectionEvent: Equatable, Sendable { case offer(MeetingApp), withdraw(MeetingApp) }

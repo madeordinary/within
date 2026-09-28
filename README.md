@@ -16,6 +16,7 @@ Native macOS dictation with on-device transcription and explicit control over re
 - Uncertain insertion keeps words available for review, explicit Copy, or Discard.
 - No account, telemetry, or cloud transcription. Dictation history is off until you choose it, and then stays on this Mac for as long as you pick.
 - Notes: type or talk into a page; words appear as you speak and are saved only on this Mac. Audio is never saved.
+- Optional: mute your Mac's sound while you dictate (for example over YouTube or music); calls are never muted.
 
 See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
 

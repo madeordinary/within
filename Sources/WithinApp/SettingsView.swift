@@ -290,6 +290,11 @@ struct SettingsView: View {
                     Divider()
                     PermissionRow(title: "Accessibility", detail: "Inserts into your original field and checks focus. Optional for practice and Copy.", allowed: model.accessibilityAllowed, action: model.requestAccessibility)
                 }.withinSurface()
+                VStack(alignment: .leading, spacing: 12) {
+                    row("Mute this Mac’s sound while dictating", detail: "When another app is playing, Within silences your Mac’s sound output while you dictate and turns it back on when you stop. Videos and music keep playing silently. Nothing is muted while another app is using a microphone, such as a call. Within’s start and stop sounds are muted too. Pausing instead of muting is planned.") {
+                        Toggle("Mute this Mac’s sound while dictating", isOn: $model.muteOutputWhileDictating).labelsHidden().toggleStyle(.switch)
+                    }
+                }.withinSurface(padding: 16)
             case "History":
                 heading("Your dictation history", detail: "Saved only on this Mac, left out of Time Machine backups and never uploaded.")
                 VStack(alignment: .leading, spacing: 14) {

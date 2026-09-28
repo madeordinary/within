@@ -6,7 +6,7 @@ import WithinCore
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -244,7 +244,11 @@ func nativeChecks(to output: URL) throws {
     let updatePreview = fixture("update-available")
     updatePreview.checkForUpdates()
     updatePreview.setAutomaticUpdateChecks(false)
-    let updatesPassed = updatePreview.availableUpdate?.build == 12 && !updatePreview.checkingForUpdates
+    // Mute is opt-in and a preview never changes it or touches the output device.
+    let mutePreview = fixture("ready")
+    let muteDefaultOff = !mutePreview.muteOutputWhileDictating
+    mutePreview.muteOutputWhileDictating = true
+    let updatesPassed = muteDefaultOff && updatePreview.availableUpdate?.build == 12 && !updatePreview.checkingForUpdates
         && updatePreview.automaticUpdateChecks == false && fixture("ready").automaticUpdateChecks == nil
         && fixture("ready").updateSummary == "Not checked yet."
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore

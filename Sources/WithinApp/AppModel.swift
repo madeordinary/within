@@ -28,6 +28,8 @@ final class AppModel: ObservableObject {
     @Published var settingsSection = "General"
     @Published private(set) var setupComplete: Bool
     @Published var soundsEnabled: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(soundsEnabled, forKey: "soundsEnabled") } }
+    /// Opt-in: silence this Mac's output while dictating; never during a call. Off by default.
+    @Published var muteOutputWhileDictating: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(muteOutputWhileDictating, forKey: "muteOutputWhileDictating") } }
     private var lastErrorCode = "none"
     private var lastModelCheck = "not_checked"
     private let readinessWaitMessage = "Local speech is busy. Try again when it’s ready."
@@ -143,6 +145,7 @@ final class AppModel: ObservableObject {
         previewMode = preview
         store = ModelStore(manifest: manifest, base: base)
         soundsEnabled = UserDefaults.standard.bool(forKey: "soundsEnabled")
+        muteOutputWhileDictating = UserDefaults.standard.bool(forKey: "muteOutputWhileDictating")
         compatibilityPaste = UserDefaults.standard.bool(forKey: "compatibilityPaste")
         mode = ActivationMode(rawValue: UserDefaults.standard.string(forKey: "activationMode") ?? "hold") ?? .hold
         dictationShortcut = .restored(from: UserDefaults.standard.data(forKey: "dictationShortcut"), legacyAlternate: UserDefaults.standard.bool(forKey: "alternateShortcut"))
@@ -158,6 +161,7 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(for: .seconds(60))
             self?.runAutomaticUpdateCheckIfDue()
         }
+        recoverOutputMuteAtLaunch()
         historyStore = HistoryStore(directory: base.appendingPathComponent("History", isDirectory: true))
         loadHistory()
         notesStore = NotesStore(directory: base.appendingPathComponent("Notes", isDirectory: true))
@@ -393,6 +397,7 @@ final class AppModel: ObservableObject {
                 let ring = try capture.start(deviceUID: microphoneUID) { self.startupDiagnostics.mark($0) }
                 let rate = capture.sampleRate
                 guard session.recording(id) else { capture.stop(); throw CancellationError() }
+                if !practice { muteOutputIfNeeded() }
                 message = "Starting microphone…"; notify()
                 startupDiagnostics.mark(.recordingPublished)
                 startPulse(ring: ring, sampleRate: rate, id: id)
@@ -417,6 +422,7 @@ final class AppModel: ObservableObject {
                 } else { await deliver(text, id: id) }
             } catch {
                 capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+                restoreOutputIfNeeded()
                 if session.isCurrent(id) { recordStop(.pipelineError) }
                 await speech.cancel()
                 // Model integrity is independent of whether the user canceled this session.
@@ -491,6 +497,7 @@ final class AppModel: ObservableObject {
         }
         guard phase == .recording else { return }
         capture.stop(); pulse?.cancel(); pulse = nil
+        restoreOutputIfNeeded()
         if !isRecordingNote { recordStop(cause, hardwareChord: hardwareChord) }
         _ = session.stopped(id); playCue(start: false); level = 0; message = "Finishing on this Mac…"; notify(); announce("Recording stopped. Transcribing")
     }
@@ -502,6 +509,7 @@ final class AppModel: ObservableObject {
     }
     private func cancel(reason: String, cause: RecordingStopCause) {
         capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
+        restoreOutputIfNeeded()
         recordStop(cause)
         worker?.cancel(); session.cancel(); trial.discard(); releaseTarget()
         recoveryReason = nil; recoveryDetail = ""; level = 0; message = reason
@@ -584,6 +592,41 @@ final class AppModel: ObservableObject {
         dismissRecovery?(); message = "Ready when you are."; notify()
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
+
+    // MARK: Mute while dictating
+
+    private var selfBundleID: String { Bundle.main.bundleIdentifier ?? "com.madeordinary.Within" }
+    private var outputMuteRecord: OutputMuteRecord? {
+        get { UserDefaults.standard.data(forKey: "outputMuteRecord").flatMap { try? JSONDecoder().decode(OutputMuteRecord.self, from: $0) } }
+        set { if let newValue, let data = try? JSONEncoder().encode(newValue) { UserDefaults.standard.set(data, forKey: "outputMuteRecord") } else { UserDefaults.standard.removeObject(forKey: "outputMuteRecord") } }
+    }
+    /// Silences the default output only if another app is playing and no other app is using a microphone.
+    private func muteOutputIfNeeded() {
+        guard !previewMode, muteOutputWhileDictating, outputMuteRecord == nil,
+              let device = SystemOutput.defaultOutputDevice(), SystemOutput.canMute(device),
+              let uid = SystemOutput.uid(of: device), let muted = SystemOutput.isMuted(device),
+              OutputMutePolicy.shouldMute(enabled: true, clients: SystemOutput.audioClients(), selfBundleID: selfBundleID, deviceAlreadyMuted: muted) else { return }
+        // Record before muting so a crash between the two still leaves a recovery path.
+        outputMuteRecord = OutputMuteRecord(deviceUID: uid, mutedAt: Date())
+        if !SystemOutput.setMuted(device, true) { outputMuteRecord = nil }
+    }
+    /// Unmutes the device Within muted (even if the default output changed), unless the user already did.
+    private func restoreOutputIfNeeded() {
+        guard !previewMode, let record = outputMuteRecord else { return }
+        let device = SystemOutput.device(forUID: record.deviceUID)
+        if OutputMutePolicy.shouldRestore(record: record, deviceStillMuted: device.flatMap(SystemOutput.isMuted)), let device {
+            SystemOutput.setMuted(device, false)
+        }
+        outputMuteRecord = nil
+    }
+    private func recoverOutputMuteAtLaunch() {
+        guard let record = outputMuteRecord else { return }
+        let device = SystemOutput.device(forUID: record.deviceUID)
+        if OutputMutePolicy.shouldRecoverAtLaunch(record: record, deviceStillMuted: device.flatMap(SystemOutput.isMuted), now: Date()), let device {
+            SystemOutput.setMuted(device, false)
+        }
+        outputMuteRecord = nil
+    }
 
     // MARK: Updates
 
@@ -1000,5 +1043,5 @@ final class AppModel: ObservableObject {
         }
         notify()
     }
-    func shutdown() { flushNoteEdits(); cancel(cause: .shutdown); modelTask?.cancel(); shortcut.shutdown() }
+    func shutdown() { flushNoteEdits(); cancel(cause: .shutdown); restoreOutputIfNeeded(); modelTask?.cancel(); shortcut.shutdown() }
 }

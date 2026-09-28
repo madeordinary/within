@@ -45,6 +45,7 @@ Sources/WithinApp/PreviewRenderer.swift
 Sources/WithinApp/Resources/model-manifest.json
 Sources/WithinApp/ShortcutManager.swift
 Sources/WithinApp/SpeechSafetyCheck.swift
+Sources/WithinApp/SystemOutput.swift
 Sources/WithinApp/UpdateChecker.swift
 Sources/WithinApp/StreamBenchmark.swift
 Sources/WithinApp/Views.swift
@@ -61,6 +62,7 @@ Sources/WithinCore/Meetings.swift
 Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
 Sources/WithinCore/Notes.swift
+Sources/WithinCore/OutputMute.swift
 Sources/WithinCore/SessionState.swift
 Sources/WithinCore/ShortcutGesture.swift
 Sources/WithinCore/UpdateCheck.swift
@@ -74,6 +76,7 @@ Tests/WithinCoreTests/IntegrityTests.swift
 Tests/WithinCoreTests/MeetingsTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift
 Tests/WithinCoreTests/NotesTests.swift
+Tests/WithinCoreTests/OutputMuteTests.swift
 Tests/WithinCoreTests/ShortcutTests.swift
 Tests/WithinCoreTests/SystemBoundaryTests.swift
 Tests/WithinCoreTests/UpdateCheckTests.swift
