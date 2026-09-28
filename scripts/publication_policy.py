@@ -93,6 +93,7 @@ scripts/package-source.py
 scripts/prepare-fluidaudio.sh
 scripts/prepare-model-manifest.py
 scripts/release.sh
+scripts/signing-requirement.txt
 scripts/publication_policy.py
 scripts/test.sh
 """.split())
