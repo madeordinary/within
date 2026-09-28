@@ -41,10 +41,12 @@ Requirements: a Mac with Apple silicon (M1 or later), macOS 14 or later.
 Install or update
 1. Quit Within if it is running.
 2. Drag Within into the Applications folder (replace the old copy).
-3. Open Within. macOS says it can't verify the app and offers only Move to
-   Trash and Done. Click Done, then open System Settings > Privacy & Security,
-   scroll to Security and click "Open Anyway" next to the message about
-   Within. Confirm with your password or Touch ID.
+3. Open Within. The first time, macOS blocks it because Apple hasn't checked
+   this test build. You get past it once:
+   a. macOS says "Within" Not Opened. Click Done (not Move to Trash).
+   b. Open System Settings > Privacy & Security and scroll down to Security.
+   c. Next to the message that Within was blocked, click Open Anyway.
+   d. Confirm with Open Anyway and your password or Touch ID.
 4. Allow Microphone and Accessibility if asked.
 
 From build 14 on, each build is signed with the same Made Ordinary certificate,

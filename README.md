@@ -22,13 +22,25 @@ See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
 
 ## Download
 
-1. Go to [Releases](https://github.com/madeordinary/within/releases) and open the newest build at the top, marked **Pre-release**.
-2. Under **Assets**, download `Within-<version>-build<number>.dmg`. Skip the **Source code** links.
-3. Open the DMG and drag **Within** into **Applications**.
-4. Open Within. macOS says it can't verify Within and shows only **Move to Trash** and **Done**, because Apple hasn't notarized these test builds yet. Choose **Done**, then open **System Settings → Privacy & Security**, scroll to **Security**, and click **Open Anyway** next to the message about Within. Confirm with your password or Touch ID. If the button isn't there, open Within again first. On macOS 14 you can instead Control-click Within in Applications and choose **Open**.
-5. Allow Microphone and Accessibility when Within asks.
+Within needs a Mac with Apple silicon (M1 or later) and macOS 14 or later.
 
-Within needs a Mac with Apple silicon (M1 or later) and macOS 14 or later. To update later, see [Updates](#updates).
+1. Go to [Releases](https://github.com/madeordinary/within/releases) and open the newest build at the top, marked **Pre-release**.
+2. Under **Assets**, click `Within-<version>-build<number>.dmg` to download it. Skip the **Source code** links.
+3. Open the downloaded DMG and drag **Within** onto the **Applications** folder.
+
+### Opening Within the first time
+
+Apple hasn't checked these test builds yet, so macOS blocks the first open. You get past it once, in System Settings:
+
+1. Double-click **Within** in Applications. macOS says **“Within” Not Opened** and offers **Move to Trash** or **Done**. Click **Done**.
+2. Open **System Settings** and choose **Privacy & Security** in the sidebar.
+3. Scroll down to **Security**. Next to the message that Within was blocked, click **Open Anyway**.
+4. Confirm with **Open Anyway** and your Mac's password or Touch ID. Within opens.
+5. Allow **Microphone** and **Accessibility** when Within asks.
+
+Don't see **Open Anyway**? Double-click Within again, then go straight back to Privacy & Security; the button only shows for a while after a blocked open. On macOS 14 you can instead Control-click Within in Applications and choose **Open**.
+
+To update later, see [Updates](#updates).
 
 ## Build and test
 
