@@ -524,3 +524,146 @@ func meetingTapProbe() async {
         report["error"] = "\(error)"; print("Meeting tap probe failed."); finish(1)
     }
 }
+
+/// Developer-only: evaluates FluidAudio's true streaming models (Parakeet Unified, Nemotron) on
+/// the same fixtures as the Parakeet TDT and Apple runs. Paced for latency, fast for throughput.
+func streamingCandidateBenchmark() async {
+    let args = CommandLine.arguments
+    guard args.count == 8, ["unified", "nemotron"].contains(args[2]), let seconds = Double(args[5]) else {
+        print("Usage: Within --streaming-candidate-benchmark unified|nemotron model-directory fixture-audio seconds output-json paced|fast"); exit(2)
+    }
+    let paced = args[7] == "paced"
+    var report: [String: Any] = ["fixtureOnly": true, "candidate": args[2], "paced": paced]
+    let output = URL(fileURLWithPath: args[6])
+    func finish(_ code: Int32) -> Never {
+        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+    }
+    do {
+        URLProtocol.registerClass(OfflineProbe.self)
+        let directory = URL(fileURLWithPath: args[3])
+        let baseline = physicalFootprintMB()
+        let clock = ContinuousClock()
+        let loadStart = clock.now
+        let append: (AVAudioPCMBuffer) async throws -> Void
+        let process: () async throws -> Void
+        let partial: () async -> String
+        let complete: () async throws -> String
+        if args[2] == "unified" {
+            let manager = StreamingUnifiedAsrManager(config: UnifiedConfig(leftFrames: 70, chunkFrames: 7, rightFrames: 7), encoderPrecision: .int8)
+            try await manager.loadModels(from: directory)
+            append = { try await manager.appendAudio($0) }; process = { try await manager.processBufferedAudio() }
+            partial = { await manager.getPartialTranscript() }; complete = { try await manager.finish() }
+            report["configuration"] = "Parakeet Unified 0.6B int8, streaming 70/7/7 (1.12 s)"
+        } else {
+            let manager = StreamingNemotronAsrManager(requestedChunkSize: .ms1120)
+            try await manager.loadModels(from: directory)
+            append = { try await manager.appendAudio($0) }; process = { try await manager.processBufferedAudio() }
+            partial = { await manager.getPartialTranscript() }; complete = { try await manager.finish() }
+            report["configuration"] = "Nemotron Speech Streaming 0.6B English, 1.12 s chunks"
+        }
+        let loadDuration = loadStart.duration(to: clock.now).components
+        report["loadSeconds"] = Double(loadDuration.seconds) + Double(loadDuration.attoseconds) / 1e18
+        report["afterLoadFootprintMB"] = physicalFootprintMB(); report["baselineFootprintMB"] = baseline
+
+        let file = try AVAudioFile(forReading: URL(fileURLWithPath: args[4]))
+        let format = file.processingFormat
+        let frames = AVAudioFrameCount(min(Double(file.length), seconds * format.sampleRate))
+        guard let source = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { throw SpeechFailure.format }
+        try file.read(into: source, frameCount: frames)
+        let block = AVAudioFrameCount(format.sampleRate / 10)
+        var updates: [(wall: Double, audio: Double, chars: Int)] = []
+        var lastChars = 0
+        var peak = physicalFootprintMB()
+        let start = clock.now
+        func wall() -> Double { let c = start.duration(to: clock.now).components; return Double(c.seconds) + Double(c.attoseconds) / 1e18 }
+        var offset: AVAudioFrameCount = 0
+        while offset < source.frameLength {
+            let count = min(block, source.frameLength - offset)
+            guard let slice = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count) else { throw SpeechFailure.format }
+            slice.frameLength = count
+            for channel in 0..<Int(format.channelCount) {
+                slice.floatChannelData![channel].update(from: source.floatChannelData![channel].advanced(by: Int(offset)), count: Int(count))
+            }
+            try await append(slice)
+            try await process()
+            offset += count
+            let audio = Double(offset) / format.sampleRate
+            let text = await partial()
+            if text.count != lastChars { lastChars = text.count; updates.append((wall(), audio, text.count)) }
+            if Int(offset) % Int(format.sampleRate * 5) < Int(block) { peak = max(peak, physicalFootprintMB()) }
+            if paced { try await clock.sleep(until: start.advanced(by: .seconds(audio))) }
+        }
+        let fed = wall()
+        let text = TranscriptFormatting.clean(try await complete())
+        let done = wall()
+        guard OfflineProbe.requestCount == 0 else { throw SpeechFailure.unexpectedNetwork }
+        let audio = Double(source.frameLength) / format.sampleRate
+        let total = max(1, text.count)
+        let lags = updates.filter { $0.audio > 15 }.map { $0.audio - Double($0.chars) / Double(total) * audio }
+        func median(_ v: [Double]) -> Double { v.isEmpty ? -1 : v.sorted()[v.count / 2] }
+        func p90(_ v: [Double]) -> Double { v.isEmpty ? -1 : v.sorted()[min(v.count - 1, Int(Double(v.count) * 0.9))] }
+        report["audioSeconds"] = audio; report["feedWallSeconds"] = fed; report["finishAfterInputSeconds"] = done - fed
+        report["realTimeFactor"] = paced ? -1 : audio / max(done, 0.001)
+        report["updates"] = updates.count
+        report["firstNonEmptyTextAudioSeconds"] = updates.first { $0.chars > 0 }?.audio ?? -1
+        report["estimatedShownLagSecondsMedian"] = median(lags); report["estimatedShownLagSecondsP90"] = p90(lags)
+        report["peakFootprintMB"] = peak
+        report["interceptedNetworkRequests"] = OfflineProbe.requestCount
+        report["syntheticFixtureTranscript"] = text
+        print("Streaming candidate fixture completed. No microphone was opened."); finish(0)
+    } catch {
+        report["error"] = "\(error)"; print("Streaming candidate fixture failed."); finish(1)
+    }
+}
+
+/// Developer-only: two Parakeet Unified streaming sessions, each with its own model instance,
+/// fed different fixtures concurrently. Reports both transcripts so cross-talk is detectable.
+func unifiedTwoStreamFixture() async {
+    let args = CommandLine.arguments
+    guard args.count == 7, let seconds = Double(args[5]) else {
+        print("Usage: Within --unified-two-stream-fixture model-directory fixture-a fixture-b seconds output-json"); exit(2)
+    }
+    var report: [String: Any] = ["fixtureOnly": true, "candidate": "Parakeet Unified 0.6B int8 70/7/7, two sessions"]
+    let output = URL(fileURLWithPath: args[6])
+    func finish(_ code: Int32) -> Never {
+        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+    }
+    do {
+        URLProtocol.registerClass(OfflineProbe.self)
+        let directory = URL(fileURLWithPath: args[2])
+        @Sendable func session(_ path: String) async throws -> String {
+            let manager = StreamingUnifiedAsrManager(config: UnifiedConfig(leftFrames: 70, chunkFrames: 7, rightFrames: 7), encoderPrecision: .int8)
+            try await manager.loadModels(from: directory)
+            let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+            let format = file.processingFormat
+            let frames = AVAudioFrameCount(min(Double(file.length), seconds * format.sampleRate))
+            guard let source = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames) else { throw SpeechFailure.format }
+            try file.read(into: source, frameCount: frames)
+            let block = AVAudioFrameCount(format.sampleRate / 10)
+            var offset: AVAudioFrameCount = 0
+            while offset < source.frameLength {
+                let count = min(block, source.frameLength - offset)
+                guard let slice = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: count) else { throw SpeechFailure.format }
+                slice.frameLength = count
+                slice.floatChannelData![0].update(from: source.floatChannelData![0].advanced(by: Int(offset)), count: Int(count))
+                try await manager.appendAudio(slice)
+                try await manager.processBufferedAudio()
+                offset += count
+            }
+            return TranscriptFormatting.clean(try await manager.finish())
+        }
+        let clock = ContinuousClock()
+        let start = clock.now
+        async let a = session(args[3])
+        async let b = session(args[4])
+        let (first, second) = try await (a, b)
+        let elapsed = start.duration(to: clock.now).components
+        report["wallSeconds"] = Double(elapsed.seconds) + Double(elapsed.attoseconds) / 1e18
+        report["peakFootprintMB"] = physicalFootprintMB()
+        report["transcriptA"] = first; report["transcriptB"] = second
+        report["interceptedNetworkRequests"] = OfflineProbe.requestCount
+        print("Unified two-stream fixture completed. No microphone was opened."); finish(0)
+    } catch {
+        report["error"] = "\(error)"; print("Unified two-stream fixture failed."); finish(1)
+    }
+}
