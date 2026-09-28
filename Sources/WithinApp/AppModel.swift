@@ -59,6 +59,10 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveConfirmed = ""
     @Published private(set) var liveVolatile = ""
     @Published private(set) var notesMessage = ""
+    /// Update checks: `nil` means not chosen, which behaves as off. Nothing installs itself.
+    @Published private(set) var automaticUpdateChecks: Bool?
+    @Published private(set) var updateResult: UpdateCheckResult?
+    @Published private(set) var checkingForUpdates = false
 
     let manifest: ModelManifest
     let store: ModelStore
@@ -87,6 +91,7 @@ final class AppModel: ObservableObject {
     private var notesStore: NotesStore?
     private var pendingNoteGap: String?
     private var noteSaveTasks: [UUID: Task<Void, Never>] = [:]
+    private var updateTimer: Timer?
     private var lastNoteCheckpoint = ContinuousClock.now
     var stateChanged: (() -> Void)?
     var showMain: (() -> Void)?
@@ -94,6 +99,7 @@ final class AppModel: ObservableObject {
     var showAudioSettings: (() -> Void)?
     var showModelSettings: (() -> Void)?
     var showHistorySettings: (() -> Void)?
+    var showAboutSettings: (() -> Void)?
     var showHelp: (() -> Void)?
     var showSetup: (() -> Void)?
     var showPractice: (() -> Void)?
@@ -117,6 +123,8 @@ final class AppModel: ObservableObject {
     var startsInPractice: Bool { practiceAreaIsActive?() == true }
     var effectiveRetention: HistoryRetention { historyRetention ?? .off }
     var isRecordingNote: Bool { recordingNoteID != nil }
+    var currentBuild: Int { Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0 }
+    var availableUpdate: ReleaseInfo? { if case .available(let release) = updateResult { return release }; return nil }
     var selectedNote: Note? { notes.first { $0.id == selectedNoteID } }
     var privacySummary: String {
         switch effectiveRetention {
@@ -141,7 +149,15 @@ final class AppModel: ObservableObject {
         microphoneUID = UserDefaults.standard.string(forKey: "microphoneUID") ?? ""
         setupComplete = UserDefaults.standard.bool(forKey: "setupComplete")
         historyRetention = .restored(from: UserDefaults.standard.string(forKey: "historyRetention"))
+        automaticUpdateChecks = UserDefaults.standard.object(forKey: "automaticUpdateChecks") as? Bool
         if preview { return }
+        updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.runAutomaticUpdateCheckIfDue() }
+        }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(60))
+            self?.runAutomaticUpdateCheckIfDue()
+        }
         historyStore = HistoryStore(directory: base.appendingPathComponent("History", isDirectory: true))
         loadHistory()
         notesStore = NotesStore(directory: base.appendingPathComponent("Notes", isDirectory: true))
@@ -569,6 +585,40 @@ final class AppModel: ObservableObject {
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
 
+    // MARK: Updates
+
+    func setAutomaticUpdateChecks(_ enabled: Bool) {
+        automaticUpdateChecks = enabled
+        guard !previewMode else { return }
+        UserDefaults.standard.set(enabled, forKey: "automaticUpdateChecks")
+        runAutomaticUpdateCheckIfDue()
+    }
+    func checkForUpdates() {
+        guard !previewMode, !checkingForUpdates else { return }
+        checkingForUpdates = true
+        Task { [weak self] in
+            guard let self else { return }
+            let result = await UpdateChecker.check(currentBuild: currentBuild)
+            updateResult = result; checkingForUpdates = false
+            UserDefaults.standard.set(Date(), forKey: "lastUpdateCheck")
+            announce(updateSummary)
+        }
+    }
+    private func runAutomaticUpdateCheckIfDue() {
+        let last = UserDefaults.standard.object(forKey: "lastUpdateCheck") as? Date
+        guard UpdateCheck.automaticCheckDue(enabled: automaticUpdateChecks, lastCheck: last, now: Date()) else { return }
+        checkForUpdates()
+    }
+    var updateSummary: String {
+        switch updateResult {
+        case nil: return checkingForUpdates ? "Checking for updates…" : "Not checked yet."
+        case .upToDate: return "Within is up to date (build \(currentBuild))."
+        case .available(let release): return "\(release.title) is available."
+        case .noReleases: return "No builds have been published yet."
+        case .unavailable: return "Couldn’t check for updates. Try again later."
+        }
+    }
+
     // MARK: Voice notes
 
     @discardableResult func newNote() -> UUID {
@@ -885,6 +935,13 @@ final class AppModel: ObservableObject {
         modelBusy = false; workerBusy = false
         mode = .toggle; dictationShortcut = .controlShiftD; microphoneUID = "preview-input"
         historyRetention = nil; history = []
+        automaticUpdateChecks = nil; updateResult = nil
+        if state == "update-available" {
+            automaticUpdateChecks = true
+            updateResult = .available(ReleaseInfo(tag: "v0.1.0-build12", title: "Within 0.1.0 (build 12)",
+                notes: "Check for updates from Within, and a weekly check you can turn on.", pageURL: URL(string: "https://github.com/madeordinary/within/releases")!,
+                build: 12, prerelease: true))
+        }
         notes = []; selectedNoteID = nil; recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""
         if state == "notes" || state == "note-recording" || state == "note-preparing" {
             // Synthetic sample notes only; previews never read or write the Notes folder.

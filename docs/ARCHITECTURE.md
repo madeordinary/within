@@ -8,6 +8,7 @@ Within is a native macOS app built with SwiftUI and AppKit, with a regular Dock 
 | `WithinAudioBuffer` | Preallocated C single-producer/single-consumer ring with bounded backlog, total samples, and explicit close/drain handling. |
 | `AppModel` | Main-actor session transitions; session IDs reject late output and prevent overlapping capture or loss of pending words. |
 | `LocalSpeech` | Actor-owned local Parakeet inference with serial sliding-window ingress. Dictation uses one session; named sessions for future meetings take turns on model work, and a second one may load its own model copy because a shared instance lost words in testing. |
+| `UpdateCheck` / `UpdateChecker` | Opt-in or explicit update checks: one ephemeral GET to this repository's GitHub releases list, restricted by `NetworkBoundary`, comparing the published `v<version>-build<n>` tag with `CFBundleVersion`. Nothing downloads or installs itself. |
 | `AppAudioTap` | Meetings groundwork (macOS 14.2+): a private Core Audio process tap and aggregate device downmixed into a bounded ring. Not used by any user-facing feature yet. |
 | `ModelStore` | Explicit download, constrained redirects, bounded staging, per-file size/hash validation, and atomic installation. |
 | `AccessibilityTarget` | Non-content target identities, secure-control refusal, exact target revalidation, and selected-text insertion. |

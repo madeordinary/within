@@ -34,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.showAudioSettings = { [weak self] in self?.showSettingsWindow(section: "Audio") }
             model.showModelSettings = { [weak self] in self?.showSettingsWindow(section: "Model") }
             model.showHistorySettings = { [weak self] in self?.showSettingsWindow(section: "History") }
+            model.showAboutSettings = { [weak self] in self?.showSettingsWindow(section: "About") }
             model.showHelp = { [weak self] in self?.showHelpWindow() }
             model.showSetup = { [weak self] in self?.showSetupWindow() }
             model.showPractice = { [weak self] in self?.showPracticeWindow() }
@@ -109,6 +110,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let root = NSMenuItem(title: "Within", action: nil, keyEquivalent: "")
         let application = NSMenu(title: "Within"); root.submenu = application
         application.addItem(item("About Within", #selector(openAbout)))
+        application.addItem(item("Check for Updates…", #selector(checkForUpdates)))
         application.addItem(.separator())
         application.addItem(item("Settings…", #selector(openSettings), key: ","))
         application.addItem(.separator())
@@ -150,6 +152,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openWithin() { showMainWindow() }
     @objc private func openSettings() { showSettingsWindow() }
     @objc private func openAbout() { showSettingsWindow(section: "About") }
+    @objc private func checkForUpdates() { showSettingsWindow(section: "About"); model.checkForUpdates() }
     @objc private func openHelp() { showHelpWindow() }
     @objc private func openSetup() { showSetupWindow() }
     @objc private func openPractice() { showPracticeWindow() }

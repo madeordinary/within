@@ -43,6 +43,12 @@ Open Settings with **Command-comma** or the gear button, and Help from the toolb
 
 After building, you can copy `build/Within.app` into Applications for a stable launch location. Local ad-hoc rebuilds may require macOS to approve permissions again. Native Liquid Glass controls are used on macOS 26 and later, with standard controls on earlier systems; content supports light and dark appearance.
 
+## Updates
+
+Test builds are published as GitHub pre-releases tagged `v<version>-build<number>`. Choose **Check for Updates…** in the Within menu, or turn on the weekly check in setup or Settings → About. It is off unless you choose it. A check asks GitHub for this repository's release list and sends no dictation, notes or usage data. To update, quit Within, download the new DMG and replace the app; settings, history and notes stay. Until builds are signed with a Developer ID, macOS asks you to confirm each new copy with Open Anyway, and you may need to allow Accessibility again.
+
+Maintainers build a candidate with `./scripts/release.sh`. It runs the tests and checks, then writes the DMG, checksums and draft notes under `build/release/`. It never uploads; publishing is a separate `gh release create` step.
+
 ## Contribute
 
 Read [contributing](CONTRIBUTING.md), [architecture](docs/ARCHITECTURE.md), and the [publication policy](docs/PUBLICATION.md). Reports should use synthetic text and include only the details needed to reproduce the issue.

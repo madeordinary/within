@@ -53,7 +53,14 @@ Compatibility paste is experimental and off by default. It is chosen before capt
 
 ## Network and storage
 
-The app's implemented network path is **Download local model**. It contacts `huggingface.co` and allows HTTPS redirects within the `huggingface.co` and `hf.co` domain boundaries. The host receives an IP address, public model-file paths, and the app's user agent. No dictation content, app contents, account credentials, or persistent user ID are added. Downloads disable cookies, credential storage, and URL caching; files are size/hash checked before installation. About links open the browser only when clicked.
+The app has two network paths: **Download local model** and **update checks**. The model download It contacts `huggingface.co` and allows HTTPS redirects within the `huggingface.co` and `hf.co` domain boundaries. The host receives an IP address, public model-file paths, and the app's user agent. No dictation content, app contents, account credentials, or persistent user ID are added. Downloads disable cookies, credential storage, and URL caching; files are size/hash checked before installation. About links open the browser only when clicked.
+
+**Update checks** happen when you choose Check for Updates, or once a week if you turn that on in setup or Settings → About. Automatic checks are off unless you choose them. A check is one HTTPS GET to `https://api.github.com/repos/madeordinary/within/releases`:
+- Redirects outside that path are refused.
+- It uses an ephemeral session with no cookies, cache or stored credentials.
+- GitHub receives your IP address and the system's default user agent. No dictation, notes, history, settings, identifiers or usage data are sent.
+- Within stores only whether weekly checks are on and when it last checked.
+- Found updates are shown in Settings → About with a Download button that opens the release page in your browser. Nothing is downloaded or installed automatically; you replace the app yourself, and your settings, history and notes stay.
 
 App-managed storage consists of:
 
@@ -62,7 +69,7 @@ App-managed storage consists of:
 - An empty single-instance lock in the same application-support folder.
 - Optional dictation history in `~/Library/Application Support/Within/History/`, only after you choose to keep it.
 - Notes you create, in `~/Library/Application Support/Within/Notes/`.
-- Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection and history retention; no dictation content.
+- Preferences for `com.madeordinary.Within`: setup and interaction choices, including microphone selection, history retention, the weekly update-check choice and the last check time; no dictation content.
 
 Core ML may also create OS-managed compiled-model caches. Microphone permission is required for recording. Accessibility is optional for practice/Copy and required for insertion and global modifier-only shortcuts. Start at login is an explicit Settings choice. The preview is a single process with Hardened Runtime and an audio-input entitlement; App Sandbox compatibility and trusted public signing remain release gates.
 

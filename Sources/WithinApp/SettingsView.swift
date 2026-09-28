@@ -339,7 +339,8 @@ struct SettingsView: View {
                     .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                 Link("Source & app license ↗", destination: URL(string: "https://github.com/madeordinary/within")!)
                 Link("FluidAudio source & license ↗", destination: URL(string: "https://github.com/FluidInference/FluidAudio")!)
-                Text("Links open in your browser. Within does not check for updates automatically.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                Text("Links open in your browser.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                UpdatesPanel(model: model).withinSurface(padding: 16)
                 Button("Review diagnostics…") { showingDiagnostics = true }
                 Text("Review content-free status and error information before choosing to save a report. Nothing is sent automatically.")
                     .font(.system(size: 11)).foregroundStyle(Palette.secondary)
@@ -419,6 +420,48 @@ struct HelpView: View {
         VStack(alignment: .leading, spacing: 9) {
             Label(title, systemImage: icon).font(.system(size: 14, weight: .semibold))
             Text(text).font(.system(size: 13)).foregroundStyle(Palette.secondary).lineSpacing(3)
+        }
+    }
+}
+
+/// Explicit or opt-in weekly checks. Download opens the release page; nothing installs itself.
+struct UpdatesPanel: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Updates").font(.system(size: 13, weight: .semibold))
+                    Text(model.updateSummary).font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                }
+                Spacer(minLength: 8)
+                if model.checkingForUpdates { ProgressView().controlSize(.small).accessibilityLabel("Checking for updates") }
+                Button("Check for Updates", action: model.checkForUpdates).quietAction().disabled(model.checkingForUpdates)
+            }
+            if let release = model.availableUpdate {
+                VStack(alignment: .leading, spacing: 8) {
+                    if !release.notes.isEmpty {
+                        Text(release.notes).font(.system(size: 12)).lineLimit(6).fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack {
+                        Button("Download…") { NSWorkspace.shared.open(release.pageURL) }.primaryAction()
+                            .accessibilityHint("Opens the release page in your browser")
+                        Text("Then quit Within and replace the app in Applications. Your settings, history and notes stay.")
+                            .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            Divider()
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Check automatically once a week").font(.system(size: 13, weight: .medium))
+                    Text("Sends one request to GitHub (api.github.com). No dictation, notes, history or usage data. Off unless you turn it on.")
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 12)
+                Toggle("Check automatically once a week", isOn: Binding(get: { model.automaticUpdateChecks == true }, set: model.setAutomaticUpdateChecks))
+                    .labelsHidden().toggleStyle(.switch)
+            }
         }
     }
 }

@@ -6,7 +6,7 @@ import WithinCore
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -240,6 +240,13 @@ func nativeChecks(to output: URL) throws {
     preparingNote.cancel(cause: .cancelButton)
     let preparingCancelEnded = preparingNote.phase == .ready && preparingNote.message.contains("canceled before it started")
     let notesGuardsPassed = dictationRefused && secondRecordingRefused && !noteSession.canStart && preparingCancelEnded
+    // Previews never reach the network or store update choices.
+    let updatePreview = fixture("update-available")
+    updatePreview.checkForUpdates()
+    updatePreview.setAutomaticUpdateChecks(false)
+    let updatesPassed = updatePreview.availableUpdate?.build == 12 && !updatePreview.checkingForUpdates
+        && updatePreview.automaticUpdateChecks == false && fixture("ready").automaticUpdateChecks == nil
+        && fixture("ready").updateSummary == "Not checked yet."
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
@@ -286,8 +293,9 @@ func nativeChecks(to output: URL) throws {
         "historyRetentionPreviewPassed": historyPolicyPassed,
         "notesStoreOwnerOnlyAtomicPassed": notesStorePassed,
         "notesOneCaptureAtATimePassed": notesGuardsPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed,
+        "updatePreviewWithoutNetworkPassed": updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

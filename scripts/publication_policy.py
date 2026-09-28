@@ -44,6 +44,7 @@ Sources/WithinApp/PreviewRenderer.swift
 Sources/WithinApp/Resources/model-manifest.json
 Sources/WithinApp/ShortcutManager.swift
 Sources/WithinApp/SpeechSafetyCheck.swift
+Sources/WithinApp/UpdateChecker.swift
 Sources/WithinApp/StreamBenchmark.swift
 Sources/WithinApp/Views.swift
 Sources/WithinApp/main.swift
@@ -61,6 +62,7 @@ Sources/WithinCore/NetworkBoundary.swift
 Sources/WithinCore/Notes.swift
 Sources/WithinCore/SessionState.swift
 Sources/WithinCore/ShortcutGesture.swift
+Sources/WithinCore/UpdateCheck.swift
 THIRD_PARTY_NOTICES.md
 Tests/AudioBufferStress/main.c
 Tests/Tooling/test_publication.py
@@ -73,6 +75,7 @@ Tests/WithinCoreTests/NetworkBoundaryTests.swift
 Tests/WithinCoreTests/NotesTests.swift
 Tests/WithinCoreTests/ShortcutTests.swift
 Tests/WithinCoreTests/SystemBoundaryTests.swift
+Tests/WithinCoreTests/UpdateCheckTests.swift
 Tests/WithinCoreTests/WorkflowTests.swift
 docs/ARCHITECTURE.md
 docs/PRIVACY.md
@@ -85,6 +88,7 @@ scripts/make-icon.swift
 scripts/package-source.py
 scripts/prepare-fluidaudio.sh
 scripts/prepare-model-manifest.py
+scripts/release.sh
 scripts/publication_policy.py
 scripts/test.sh
 """.split())

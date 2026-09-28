@@ -169,6 +169,14 @@ struct MainView: View {
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
                     SessionStatusView(model: model)
+                    if let release = model.availableUpdate {
+                        HStack(spacing: 10) {
+                            Image(systemName: "arrow.down.circle").foregroundStyle(Palette.accent).accessibilityHidden(true)
+                            Text("\(release.title) is available.").font(.system(size: 12, weight: .medium))
+                            Spacer()
+                            Button("View") { model.showAboutSettings?() }.quietAction()
+                        }.withinSurface(padding: 12)
+                    }
                     if model.editingShortcut {
                         Button("Return to shortcut setup") { model.showSettings?() }.primaryAction()
                     }
@@ -245,9 +253,12 @@ struct SetupView: View {
     var done: () -> Void = {}
     @Binding var step: Int
     @State private var historyChoice: HistoryRetention?
-    private let steps = ["Welcome", "Microphone", "Local speech", "Shortcut", "History"]
+    @State private var weeklyUpdateChecks: Bool?
+    private let steps = ["Welcome", "Microphone", "Local speech", "Shortcut", "Choices"]
     private var lastStep: Int { steps.count - 1 }
     private var chosenHistory: HistoryRetention { historyChoice ?? model.historyRetention ?? .week }
+    private var chosenUpdates: Bool { weeklyUpdateChecks ?? model.automaticUpdateChecks ?? false }
+    private func saveChoices() { model.chooseHistoryRetention(chosenHistory); model.setAutomaticUpdateChecks(chosenUpdates) }
     private var canContinue: Bool {
         if step == 1 { return model.microphoneAllowed && model.selectedInputAvailable }
         if step == 2 { return model.modelVerified && !model.modelBusy }
@@ -309,11 +320,31 @@ struct SetupView: View {
                                 .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                         }
                     } else {
-                        heading("Keep a history?", detail: "Find and copy past dictations later. History stays on this Mac, is left out of Time Machine backups and is never uploaded. You can change this any time in Settings.")
-                        VStack(alignment: .leading, spacing: 14) {
+                        heading("Two last choices.", detail: "You can change both any time in Settings.")
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Keep a history of your dictations?").font(.system(size: 13, weight: .semibold))
+                            Text("Find and copy past dictations later. History stays on this Mac, is left out of Time Machine backups and is never uploaded.")
+                                .font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
                             HistoryRetentionPicker(selection: Binding(get: { chosenHistory }, set: { historyChoice = $0 }))
                             Text(chosenHistory.keepsHistory ? "Only words you insert or copy are kept. Practice, canceled and discarded words never are." : "Nothing will be saved.")
                                 .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                        }.withinSurface()
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Check for updates?").font(.system(size: 13, weight: .semibold))
+                            Text("A weekly check sends one request to GitHub. No dictation, notes or usage data. Updates never install themselves.")
+                                .font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                            HStack(spacing: 8) {
+                                ForEach([(false, "Only when I ask"), (true, "Weekly")], id: \.0) { value, label in
+                                    let selected = chosenUpdates == value
+                                    Button { weeklyUpdateChecks = value } label: {
+                                        Text(label).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                            .padding(.horizontal, 12).padding(.vertical, 7)
+                                            .foregroundStyle(selected ? Palette.canvas : Palette.text)
+                                            .background(selected ? AnyShapeStyle(Palette.text) : AnyShapeStyle(Palette.tint.opacity(0.7)), in: Capsule())
+                                            .contentShape(Capsule())
+                                    }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+                                }
+                            }.accessibilityElement(children: .contain).accessibilityLabel("Update checks")
                         }.withinSurface()
                     }
                 }.font(.system(size: 13)).padding(.horizontal, 28).padding(.top, 10).padding(.bottom, 24)
@@ -325,7 +356,7 @@ struct SetupView: View {
                         Text(step == 0 ? "Get started" : "Continue").frame(maxWidth: .infinity).padding(.vertical, 5)
                     }.primaryAction().disabled(!canContinue).keyboardShortcut(.defaultAction)
                 } else {
-                    Button { model.chooseHistoryRetention(chosenHistory); model.completeSetup(); done(); model.showPractice?() } label: {
+                    Button { saveChoices(); model.completeSetup(); done(); model.showPractice?() } label: {
                         Text("Try dictation").frame(maxWidth: .infinity).padding(.vertical, 5)
                     }.primaryAction()
                         .disabled(!model.canStart).keyboardShortcut(.defaultAction)
@@ -333,7 +364,7 @@ struct SetupView: View {
                 HStack {
                     if step > 0 { Button("Back") { step -= 1 }.buttonStyle(.link) }
                     Spacer()
-                    if step == lastStep { Button("Finish without practicing") { model.chooseHistoryRetention(chosenHistory); model.completeSetup(); done() }.buttonStyle(.link) }
+                    if step == lastStep { Button("Finish without practicing") { saveChoices(); model.completeSetup(); done() }.buttonStyle(.link) }
                 }.font(.system(size: 12))
             }.padding(.horizontal, 28).padding(.vertical, 20)
         }.frame(minWidth: 540, minHeight: 520).background(Palette.canvas).foregroundStyle(Palette.text).tint(Palette.accent)

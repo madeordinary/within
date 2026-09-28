@@ -12,4 +12,13 @@ final class NetworkBoundaryTests: XCTestCase {
             XCTAssertFalse(NetworkBoundary.permitsModelDownload(URL(string: url)!))
         }
     }
+    func testUpdateCheckReachesOnlyThisRepositorysReleases() {
+        XCTAssertTrue(NetworkBoundary.permitsUpdateCheck(UpdateCheck.releasesURL))
+        for url in ["http://api.github.com/repos/madeordinary/within/releases", "https://api.github.com.evil.test/repos/madeordinary/within/releases",
+                    "https://api.github.com/repos/someone/else/releases", "https://github.com/madeordinary/within/releases",
+                    "https://user:pass@api.github.com/repos/madeordinary/within/releases", "https://api.github.com:444/repos/madeordinary/within/releases"] {
+            XCTAssertFalse(NetworkBoundary.permitsUpdateCheck(URL(string: url)!))
+        }
+        XCTAssertFalse(NetworkBoundary.permitsModelDownload(UpdateCheck.releasesURL))
+    }
 }
