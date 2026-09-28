@@ -6,7 +6,8 @@ import Foundation
 // Writes opaque background.png and background@2x.png; Finder ignores many images with alpha.
 // Finder draws windows with a background picture in light mode, so light colors stay readable.
 let directory = URL(fileURLWithPath: CommandLine.arguments[1], isDirectory: true)
-let size = CGSize(width: 660, height: 480)
+// Taller than the content: Finder shows scroll bars when icons come near the window's edge.
+let size = CGSize(width: 660, height: 540)
 
 func color(_ hex: Int) -> NSColor {
     NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
@@ -39,22 +40,22 @@ for scale in [1, 2] {
 
     canvas.setFill()
     CGRect(origin: .zero, size: size).fill()
-    draw("Drag Within into Applications", font: serif(24), color: text, in: CGRect(x: 0, y: 34, width: size.width, height: 34), centered: true)
+    draw("Drag Within into Applications", font: serif(24), color: text, in: CGRect(x: 0, y: 40, width: size.width, height: 34), centered: true)
 
-    // Icons sit at (170, 175) and (490, 175), 96 points wide.
+    // Icons sit at (170, 185) and (490, 185), 96 points wide.
     let arrow = NSBezierPath()
-    arrow.move(to: NSPoint(x: 256, y: 175)); arrow.line(to: NSPoint(x: 402, y: 175))
-    arrow.move(to: NSPoint(x: 388, y: 162)); arrow.line(to: NSPoint(x: 404, y: 175)); arrow.line(to: NSPoint(x: 388, y: 188))
+    arrow.move(to: NSPoint(x: 256, y: 185)); arrow.line(to: NSPoint(x: 402, y: 185))
+    arrow.move(to: NSPoint(x: 388, y: 172)); arrow.line(to: NSPoint(x: 404, y: 185)); arrow.line(to: NSPoint(x: 388, y: 198))
     arrow.lineWidth = 5; arrow.lineCapStyle = .round; arrow.lineJoinStyle = .round
     accent.setStroke(); arrow.stroke()
 
-    // The Read Me icon sits inside this panel at (560, 350).
-    let panel = NSBezierPath(roundedRect: CGRect(x: 28, y: 282, width: 604, height: 150), xRadius: 14, yRadius: 14)
+    // The Read Me icon sits inside this panel at (540, 362).
+    let panel = NSBezierPath(roundedRect: CGRect(x: 28, y: 296, width: 604, height: 150), xRadius: 14, yRadius: 14)
     surface.setFill(); panel.fill()
     line.setStroke(); panel.lineWidth = 1; panel.stroke()
-    draw("Opening Within the first time", font: .systemFont(ofSize: 14, weight: .semibold), color: text, in: CGRect(x: 50, y: 300, width: 430, height: 22))
+    draw("Opening Within the first time", font: .systemFont(ofSize: 14, weight: .semibold), color: text, in: CGRect(x: 50, y: 314, width: 420, height: 22))
     draw("1. Open Within from Applications.\n2. If macOS says it can’t be opened, click Done.\n3. Open System Settings → Privacy & Security, scroll to Security and click Open Anyway.",
-         font: .systemFont(ofSize: 12.5), color: secondary, in: CGRect(x: 50, y: 328, width: 430, height: 96), hangingIndent: 14)
+         font: .systemFont(ofSize: 12.5), color: secondary, in: CGRect(x: 50, y: 342, width: 420, height: 96), hangingIndent: 14)
 
     NSGraphicsContext.restoreGraphicsState()
     guard let image = context.makeImage() else { exit(1) }

@@ -40,7 +40,7 @@ on run argv
             set current view of theWindow to icon view
             set toolbar visible of theWindow to false
             set statusbar visible of theWindow to false
-            set bounds of theWindow to {200, 120, 860, 600}
+            set bounds of theWindow to {200, 120, 860, 660}
             set theOptions to icon view options of theWindow
             set arrangement of theOptions to not arranged
             set icon size of theOptions to 96
@@ -49,9 +49,9 @@ on run argv
             set shows item info of theOptions to false
             set shows icon preview of theOptions to false
             set background picture of theOptions to file ".background:background.tiff"
-            set position of item "Within.app" of theWindow to {170, 175}
-            set position of item "Applications" of theWindow to {490, 175}
-            set position of item "Read Me First.txt" of theWindow to {560, 350}
+            set position of item "Within.app" of theWindow to {170, 185}
+            set position of item "Applications" of theWindow to {490, 185}
+            set position of item "Read Me First.txt" of theWindow to {540, 362}
             close
             open
             update without registering applications
