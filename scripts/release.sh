@@ -10,8 +10,17 @@ build="$(/usr/libexec/PlistBuddy -c 'Print CFBundleVersion' Info.plist)"
 tag="v${version}-build${build}"
 out="build/release/${tag}"
 if [ -e "$out" ]; then echo "$out already exists; bump CFBundleVersion or remove it."; exit 1; fi
+# Every release is signed with the same certificate so macOS permissions carry over between
+# updates. scripts/signing-requirement.txt pins it; a different certificate fails the release.
+identity="${WITHIN_SIGNING_IDENTITY:-$(security find-identity -p codesigning 2>/dev/null | awk '/"Within Signing"/ { print $2; exit }')}"
+if [ -z "$identity" ] || [ "$identity" = "-" ]; then echo "Releases need the Within Signing certificate in your keychain; see docs/PUBLICATION.md."; exit 1; fi
+git fetch --tags --quiet origin || echo "Could not fetch tags; the change list may be incomplete."
 ./scripts/test.sh
-./scripts/build.sh
+WITHIN_SIGNING_IDENTITY="$identity" ./scripts/build.sh
+requirement() { codesign -d -r- "$1" 2>&1 | sed -n 's/^designated => //p'; }
+if [ "$(requirement build/Within.app)" != "$(cat scripts/signing-requirement.txt)" ]; then
+  echo "The app's signature doesn't match scripts/signing-requirement.txt. Users would have to allow permissions again."; exit 1
+fi
 export DEVELOPER_DIR="${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}"
 bin="$(swift build --disable-sandbox --manifest-cache local -c release -debug-info-format none --show-bin-path)"
 mkdir -p "$out"
@@ -34,8 +43,11 @@ Install or update
 2. Drag Within into the Applications folder (replace the old copy).
 3. Open Within. If macOS says it can't verify the app, click Done, then open
    System Settings > Privacy & Security and click "Open Anyway".
-4. Allow Microphone and Accessibility if asked. An unsigned update may ask for
-   Accessibility again.
+4. Allow Microphone and Accessibility if asked.
+
+From build 14 on, each build is signed with the same Made Ordinary certificate,
+so updates should keep the permissions you've allowed. Coming from build 13 or earlier,
+macOS asks for Accessibility once more.
 
 Your settings, history and notes are kept in ~/Library/Application Support/Within
 and stay when you replace the app. Audio is never saved.
@@ -48,18 +60,18 @@ hdiutil verify -quiet "$dmg"
 mount="$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | awk -F'\t' '{print $NF}')"
 diff -rq build/Within.app "$mount/Within.app"
 codesign --verify --strict "$mount/Within.app"
+test "$(requirement "$mount/Within.app")" = "$(cat scripts/signing-requirement.txt)"
 hdiutil detach -quiet "$mount"
 (cd "$out" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS)
 previous="$(git describe --tags --abbrev=0 2>/dev/null || true)"
+# The app shows these notes in Settings > About, so they are for people, not developers:
+# plain words about what changed for them. changes.txt lists the commits as a starting point.
+if [ -n "$previous" ]; then git log --format='- %s' "${previous}..HEAD"; else git log --format='- %s' -15; fi > "$out/changes.txt"
 {
-  echo "Within ${version} (build ${build}), engineering preview."
+  echo "What's new: REPLACE with the changes people will notice, in plain words."
   echo
-  echo "Not signed with a Developer ID yet: see Read Me First in the DMG for Open Anyway."
-  echo "Requires Apple silicon and macOS 14 or later. Validation gates in docs/VALIDATION.md remain open."
-  echo
-  echo "Changes:"
-  if [ -n "$previous" ]; then git log --format='- %s' "${previous}..HEAD"; else git log --format='- %s' -15; fi
+  echo "To update: quit Within, drag the new Within into Applications, then open it. Your settings, history and notes stay."
 } > "$out/release-notes.md"
 echo "Release candidate ready in $out (not published)."
-echo "Review release-notes.md, then publish only when approved:"
+echo "Write What's new in release-notes.md (changes.txt lists the commits), then publish only when approved:"
 echo "  gh release create ${tag} --target $(git rev-parse HEAD) --prerelease --title \"Within ${version} (build ${build})\" --notes-file ${out}/release-notes.md ${dmg} ${out}/SHA256SUMS"

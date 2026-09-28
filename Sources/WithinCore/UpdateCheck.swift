@@ -49,6 +49,34 @@ public enum UpdateCheck {
         return newest.build > currentBuild ? .available(newest) : .upToDate(currentBuild: currentBuild)
     }
 
+    /// Release notes as plain text for the app: the title line the app already shows is dropped,
+    /// Markdown headings, emphasis and links become plain words, list items become bullets, and
+    /// anything past `maximumLines` is left for the release page.
+    public static func displayNotes(_ notes: String, maximumLines: Int = 12) -> String {
+        var lines: [String] = []
+        for raw in notes.replacingOccurrences(of: "\r\n", with: "\n").components(separatedBy: "\n") {
+            var line = raw.trimmingCharacters(in: .whitespaces)
+            while line.hasPrefix("#") { line.removeFirst() }
+            line = line.replacingOccurrences(of: "**", with: "")
+                .replacingOccurrences(of: #"\[([^\]]+)\]\([^)]*\)"#, with: "$1", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("- ") || line.hasPrefix("* ") { line = "• " + line.dropFirst(2) }
+            if line.isEmpty, lines.last?.isEmpty ?? true { continue }
+            lines.append(line)
+        }
+        if let first = lines.first, first.hasPrefix("Within "), first.contains("(build ") {
+            lines.removeFirst()
+            while lines.first?.isEmpty == true { lines.removeFirst() }
+        }
+        if lines.count > maximumLines {
+            lines = Array(lines.prefix(maximumLines))
+            while lines.last?.isEmpty == true { lines.removeLast() }
+            lines.append("…")
+        }
+        while lines.last?.isEmpty == true { lines.removeLast() }
+        return lines.joined(separator: "\n")
+    }
+
     public static let weeklyInterval: TimeInterval = 7 * 86_400
     /// Automatic checks run only when chosen, at most once a week.
     public static func automaticCheckDue(enabled: Bool?, lastCheck: Date?, now: Date) -> Bool {

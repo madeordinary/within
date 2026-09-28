@@ -30,4 +30,8 @@ python3 scripts/package-source.py --output build/Within-source.zip
 
 The packager validates and archives Git-index objects, excluding untracked files and unstaged edits. It refuses disallowed tracked content. It does not read an entire checkout recursively. Run the history check separately before publishing. Build and inspect a fresh archive for each release; never reuse an unreviewed development bundle or add raw test output.
 
+Test builds are signed with a self-signed Made Ordinary certificate named "Within Signing", kept only in the maintainer's keychain. It is not an Apple-trusted identity, so macOS still asks people to confirm the first open. It gives every build the same designated requirement, pinned in `scripts/signing-requirement.txt`, so macOS permissions carry over between updates. `scripts/release.sh` refuses to build a release without that certificate or with a different one. Never commit, attach or upload its private key or an exported `.p12`; keep a backup outside the repository. A new certificate makes everyone allow permissions once more, so change the pinned requirement only on purpose.
+
+Release notes are shown in the app's Settings → About. Write them for people using Within: what changed for them, in plain words, and how to update.
+
 Publish essential release notes, checksums, required licenses, and honest validation limits. Keep internal work logs and raw measurements private. If restricted material is published, stop sharing it, rotate any exposed credentials, and assess history/cache cleanup; deleting a current file alone is insufficient.

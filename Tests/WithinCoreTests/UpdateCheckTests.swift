@@ -49,6 +49,15 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertTrue(UpdateCheck.automaticCheckDue(enabled: true, lastCheck: now.addingTimeInterval(-8 * 86_400), now: now))
     }
 
+    func testNotesAreShownAsPlainTextWithoutTheRepeatedTitle() {
+        let build13 = "Within 0.1.0 (build 13), engineering preview.\n\nNot signed yet.\n\nChanges:\n- Mute this Mac's sound\n- Add benchmarks"
+        XCTAssertEqual(UpdateCheck.displayNotes(build13), "Not signed yet.\n\nChanges:\n• Mute this Mac's sound\n• Add benchmarks")
+        let markdown = "## What's new\r\n\r\n\r\n* **Mute** while you [dictate](https://github.com/x)\n\n"
+        XCTAssertEqual(UpdateCheck.displayNotes(markdown), "What's new\n\n• Mute while you dictate")
+        XCTAssertEqual(UpdateCheck.displayNotes("a\nb\nc\n\nd", maximumLines: 3), "a\nb\nc\n…")
+        XCTAssertEqual(UpdateCheck.displayNotes(" \n"), "")
+    }
+
     /// Updates must keep reading files written by earlier builds: new fields have to be
     /// optional or custom-decoded. These are today's on-disk formats.
     func testFilesFromBuild11StillDecode() throws {

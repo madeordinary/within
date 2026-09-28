@@ -27,6 +27,14 @@ done
 mkdir -p "$bundle/Contents/Resources/ThirdPartyLicenses"
 cp Vendor/FluidAudio/LICENSE "$bundle/Contents/Resources/ThirdPartyLicenses/FluidAudio-APACHE-2.0.txt"
 cp Vendor/FluidAudio/ThirdPartyLicenses/* "$bundle/Contents/Resources/ThirdPartyLicenses/"
-codesign --force --sign "${WITHIN_SIGNING_IDENTITY:--}" --options runtime --entitlements Entitlements.plist "$bundle"
+# macOS ties permissions to the signature. When the "Within Signing" certificate is in the
+# keychain, every build uses it so permissions carry over; otherwise the build is ad hoc.
+# Set WITHIN_SIGNING_IDENTITY to choose an identity, or "-" to force an ad-hoc signature.
+identity="${WITHIN_SIGNING_IDENTITY-}"
+if [ -z "$identity" ]; then
+    identity="$(security find-identity -p codesigning 2>/dev/null | awk '/"Within Signing"/ { print $2; exit }')"
+fi
+codesign --force --sign "${identity:--}" --options runtime --entitlements Entitlements.plist "$bundle"
+echo "Signed with ${identity:-an ad-hoc signature}." >&2
 codesign --verify --strict "$bundle"
 printf '%s\n' "$bundle"

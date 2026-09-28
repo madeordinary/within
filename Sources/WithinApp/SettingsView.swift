@@ -444,9 +444,10 @@ struct UpdatesPanel: View {
                 Button("Check for Updates", action: model.checkForUpdates).quietAction().disabled(model.checkingForUpdates)
             }
             if let release = model.availableUpdate {
+                let notes = UpdateCheck.displayNotes(release.notes)
                 VStack(alignment: .leading, spacing: 8) {
-                    if !release.notes.isEmpty {
-                        Text(release.notes).font(.system(size: 12)).lineLimit(6).fixedSize(horizontal: false, vertical: true)
+                    if !notes.isEmpty {
+                        Text(notes).font(.system(size: 12)).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
                         Button("Download…") { NSWorkspace.shared.open(release.pageURL) }.primaryAction()
