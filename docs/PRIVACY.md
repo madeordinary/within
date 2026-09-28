@@ -30,6 +30,19 @@ While recording, text appears as the local model processes it. Confirmed words a
 
 Each note is one file in `~/Library/Application Support/Within/Notes/`, readable only by your macOS account (folder 0700, files 0600) and replaced atomically. Unlike dictation history, notes are deliberate documents and **are included in Time Machine backups**. Nothing is synced or uploaded. Deleting a note removes its file; on APFS and SSD storage that is not a secure erase, and existing backups keep earlier copies until they expire.
 
+## Meetings groundwork (not a feature yet)
+
+The app contains building blocks for a future Meetings space. **No meeting capture or meeting detection runs in the app today**, and there is no Meetings screen. The building blocks are:
+- per-app audio capture through a Core Audio process tap (macOS 14.2 or later);
+- two local speech sessions;
+- rules for noticing that a meeting app started using the microphone.
+
+These paths are reachable only through developer commands:
+- `--audio-processes` prints the bundle IDs of apps with audio sessions and whether each is using input or output. It prints to the terminal only and reads no window titles, audio or call content.
+- `--app-audio-tap-fixture` and `--two-stream-meeting-fixture` play synthetic fixture audio through `afplay` and tap only that process. The tap is muted, so nothing is heard. Those fixtures transcribe locally, save nothing, and write only the report you name.
+
+Because the app binary contains the tap, `Info.plist` declares a system-audio capture usage description. macOS asks for System Audio Recording permission only when a tap actually runs, which today means one of those developer commands. Any future Meetings feature will document its own consent, detection, capture and storage behavior here before it ships.
+
 ## Insertion and clipboard
 
 Direct insertion requires Accessibility permission and sets selected text on the original control. The app retains target identities without reading destination text, selected text, document contents, or window titles. It refuses secure or unknown targets and rechecks focus and permissions before writing. It never synthesizes Return or Send. Uncertain writes are not automatically retried.

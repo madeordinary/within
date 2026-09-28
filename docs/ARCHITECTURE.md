@@ -7,7 +7,8 @@ Within is a native macOS app built with SwiftUI and AppKit, with a regular Dock 
 | `WithinCore` | Session, target, shortcut, clipboard-generation, model-integrity, and download-boundary policy without GUI or device I/O. |
 | `WithinAudioBuffer` | Preallocated C single-producer/single-consumer ring with bounded backlog, total samples, and explicit close/drain handling. |
 | `AppModel` | Main-actor session transitions; session IDs reject late output and prevent overlapping capture or loss of pending words. |
-| `LocalSpeech` | Actor-owned local Parakeet inference with serial sliding-window ingress. |
+| `LocalSpeech` | Actor-owned local Parakeet inference with serial sliding-window ingress. Dictation uses one session; named sessions for future meetings take turns on model work, and a second one may load its own model copy because a shared instance lost words in testing. |
+| `AppAudioTap` | Meetings groundwork (macOS 14.2+): a private Core Audio process tap and aggregate device downmixed into a bounded ring. Not used by any user-facing feature yet. |
 | `ModelStore` | Explicit download, constrained redirects, bounded staging, per-file size/hash validation, and atomic installation. |
 | `AccessibilityTarget` | Non-content target identities, secure-control refusal, exact target revalidation, and selected-text insertion. |
 | `ShortcutManager` / `AppDelegate` | Explicit shortcut modes, app windows, lifecycle, and single-instance ownership. |
