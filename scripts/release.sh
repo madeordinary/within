@@ -59,12 +59,13 @@ and stay when you replace the app. Audio is never saved.
 Check for updates any time from the Within menu. Updates never install themselves.
 README
 dmg="$out/Within-${version}-build${build}.dmg"
-hdiutil create -quiet -volname "Within" -srcfolder "$stage" -ov -format UDZO "$dmg"
+./scripts/make-dmg.sh "$stage" Within "$dmg"
 hdiutil verify -quiet "$dmg"
 mount="$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | awk -F'\t' '{print $NF}')"
 diff -rq build/Within.app "$mount/Within.app"
 codesign --verify --strict "$mount/Within.app"
 test "$(requirement "$mount/Within.app")" = "$(cat scripts/signing-requirement.txt)"
+test -s "$mount/.DS_Store" && test -s "$mount/.background/background.tiff"
 hdiutil detach -quiet "$mount"
 (cd "$out" && shasum -a 256 "$(basename "$dmg")" > SHA256SUMS)
 previous="$(git describe --tags --abbrev=0 2>/dev/null || true)"

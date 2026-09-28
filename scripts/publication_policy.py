@@ -88,6 +88,8 @@ docs/VALIDATION.md
 docs/brand/within-logo.png
 scripts/build.sh
 scripts/download-development-model.py
+scripts/make-dmg-background.swift
+scripts/make-dmg.sh
 scripts/make-icon.swift
 scripts/package-source.py
 scripts/prepare-fluidaudio.sh
