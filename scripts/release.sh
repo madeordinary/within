@@ -60,7 +60,9 @@ and stay when you replace the app. Audio is never saved.
 
 Check for updates any time from the Within menu. Updates never install themselves.
 README
-dmg="$out/Within-${version}-build${build}.dmg"
+# One DMG per release, always named Within.dmg: .../releases/latest/download/Within.dmg then
+# always fetches the newest build, and Within (build 16 on) downloads a release's only DMG.
+dmg="$out/Within.dmg"
 ./scripts/make-dmg.sh "$stage" Within "$dmg"
 hdiutil verify -quiet "$dmg"
 mount="$(hdiutil attach -nobrowse -readonly "$dmg" | tail -1 | awk -F'\t' '{print $NF}')"
@@ -83,4 +85,4 @@ if [ -n "$previous" ]; then git log --format='- %s' "${previous}..HEAD"; else gi
 } > "$out/release-notes.md"
 echo "Release candidate ready in $out (not published)."
 echo "Write What's new in release-notes.md (changes.txt lists the commits), then publish only when approved:"
-echo "  gh release create ${tag} --target $(git rev-parse HEAD) --prerelease --title \"Within ${version} (build ${build})\" --notes-file ${out}/release-notes.md ${dmg} ${out}/SHA256SUMS"
+echo "  gh release create ${tag} --target $(git rev-parse HEAD) --latest --title \"Within ${version} (build ${build})\" --notes-file ${out}/release-notes.md ${dmg} ${out}/SHA256SUMS"

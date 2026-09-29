@@ -24,9 +24,8 @@ See [privacy and boundaries](docs/PRIVACY.md) before trying the preview.
 
 Within needs a Mac with Apple silicon (M1 or later) and macOS 14 or later.
 
-1. Go to [Releases](https://github.com/madeordinary/within/releases) and open the newest build at the top, marked **Pre-release**.
-2. Under **Assets**, click `Within-<version>-build<number>.dmg` to download it. Skip the **Source code** links.
-3. Open the downloaded DMG and drag **Within** onto the **Applications** folder.
+1. Download **[Within.dmg](https://github.com/madeordinary/within/releases/latest/download/Within.dmg)**. This link always gets the newest build. Every build is also listed under [Releases](https://github.com/madeordinary/within/releases).
+2. Open the downloaded DMG and drag **Within** onto the **Applications** folder.
 
 ### Opening Within the first time
 
@@ -68,7 +67,7 @@ After building, you can copy `build/Within.app` into Applications for a stable l
 
 ## Updates
 
-Test builds are published as GitHub pre-releases tagged `v<version>-build<number>`. Choose **Check for Updates…** in the Within menu, or turn on the weekly check in setup or Settings → About. It is off unless you choose it. A check asks GitHub for this repository's release list and sends no dictation, notes or usage data. When an update is found, **Download…** has your browser download its DMG (from build 16 on; earlier builds open the release page). Quit Within, open the DMG and drag Within over your current copy; settings, history and notes stay. Test builds from 14 on are signed with the same self-signed Made Ordinary certificate, so updates keep the permissions you've allowed; updating from build 13 or earlier asks for Accessibility once more. Until builds are signed with a Developer ID, macOS may ask you to confirm a new copy with Open Anyway.
+Test builds are published as GitHub releases tagged `v<version>-build<number>`; they are engineering previews (builds 12–15 were marked pre-release). Choose **Check for Updates…** in the Within menu, or turn on the weekly check in setup or Settings → About. It is off unless you choose it. A check asks GitHub for this repository's release list and sends no dictation, notes or usage data. When an update is found, **Download…** has your browser download its DMG (from build 16 on; earlier builds open the release page). Quit Within, open the DMG and drag Within over your current copy; settings, history and notes stay. Test builds from 14 on are signed with the same self-signed Made Ordinary certificate, so updates keep the permissions you've allowed; updating from build 13 or earlier asks for Accessibility once more. Until builds are signed with a Developer ID, macOS may ask you to confirm a new copy with Open Anyway.
 
 Maintainers build a candidate with `./scripts/release.sh`. It runs the tests and checks, then writes the DMG, checksums and draft notes under `build/release/`. It never uploads; publishing is a separate `gh release create` step.
 
