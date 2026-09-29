@@ -40,7 +40,9 @@ Requirements: a Mac with Apple silicon (M1 or later), macOS 14 or later.
 
 Install or update
 1. Quit Within if it is running.
-2. Drag Within into the Applications folder (replace the old copy).
+2. Drag Within into the Applications folder, replacing the old copy. If your
+   Within lives somewhere else, such as Applications in your home folder,
+   replace that copy instead.
 3. Open Within. The first time, macOS blocks it because Apple hasn't checked
    this test build. You get past it once:
    a. macOS says "Within" Not Opened. Click Done (not Move to Trash).

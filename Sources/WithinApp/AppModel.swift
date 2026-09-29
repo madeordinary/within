@@ -983,6 +983,7 @@ final class AppModel: ObservableObject {
             automaticUpdateChecks = true
             updateResult = .available(ReleaseInfo(tag: "v0.1.0-build12", title: "Within 0.1.0 (build 12)",
                 notes: "Check for updates from Within, and a weekly check you can turn on.", pageURL: URL(string: "https://github.com/madeordinary/within/releases")!,
+                downloadURL: URL(string: "https://github.com/madeordinary/within/releases/download/v0.1.0-build12/Within-0.1.0-build12.dmg"),
                 build: 12, prerelease: true))
         }
         notes = []; selectedNoteID = nil; recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""

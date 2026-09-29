@@ -71,7 +71,7 @@ The app has two network paths: **Download local model** and **update checks**. T
 - It uses an ephemeral session with no cookies, cache or stored credentials.
 - GitHub receives your IP address and the system's default user agent. No dictation, notes, history, settings, identifiers or usage data are sent.
 - Within stores only whether weekly checks are on and when it last checked.
-- Found updates are shown in Settings → About with a Download button that opens the release page in your browser. Nothing is downloaded or installed automatically; you replace the app yourself, and your settings, history and notes stay.
+- Found updates are shown in Settings → About with a Download button that has your browser download the release's DMG from github.com (or opens the release page if it has no single DMG). Nothing is downloaded or installed automatically; you replace the app yourself, and your settings, history and notes stay.
 
 App-managed storage consists of:
 

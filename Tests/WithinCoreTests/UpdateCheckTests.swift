@@ -49,6 +49,27 @@ final class UpdateCheckTests: XCTestCase {
         XCTAssertTrue(UpdateCheck.automaticCheckDue(enabled: true, lastCheck: now.addingTimeInterval(-8 * 86_400), now: now))
     }
 
+    func testDownloadIsTheReleasesOwnDiskImage() {
+        func asset(_ name: String, _ url: String, state: String = "uploaded") -> [String: Any] {
+            ["name": name, "browser_download_url": url, "state": state]
+        }
+        let base = "https://github.com/madeordinary/within/releases/download/v0.1.0-build16/"
+        func download(_ assets: [[String: Any]]) -> URL? {
+            var release = entry("v0.1.0-build16"); release["assets"] = assets
+            guard case .available(let info) = UpdateCheck.evaluate(statusCode: 200, data: releases([release]), currentBuild: 15) else { return nil }
+            return info.downloadURL
+        }
+        XCTAssertEqual(download([asset("Within-0.1.0-build16.dmg", base + "Within-0.1.0-build16.dmg"), asset("SHA256SUMS", base + "SHA256SUMS")]),
+                       URL(string: base + "Within-0.1.0-build16.dmg"))
+        XCTAssertNil(download([]))
+        XCTAssertNil(download([asset("Within.dmg", "https://example.com/Within.dmg")]))
+        XCTAssertNil(download([asset("Within.dmg", "http://github.com/madeordinary/within/releases/download/v0.1.0-build16/Within.dmg")]))
+        XCTAssertNil(download([asset("Within.dmg", "https://github.com/someone/else/releases/download/v0.1.0-build16/Within.dmg")]))
+        XCTAssertNil(download([asset("Within.dmg", "https://github.com/madeordinary/within/releases/download/v0.1.0-build9/Within.dmg")]))
+        XCTAssertNil(download([asset("Within.dmg", base + "Within.dmg", state: "new")]))
+        XCTAssertNil(download([asset("A.dmg", base + "A.dmg"), asset("B.dmg", base + "B.dmg")]))
+    }
+
     func testNotesAreShownAsPlainTextWithoutTheRepeatedTitle() {
         let build13 = "Within 0.1.0 (build 13), engineering preview.\n\nNot signed yet.\n\nChanges:\n- Mute this Mac's sound\n- Add benchmarks"
         XCTAssertEqual(UpdateCheck.displayNotes(build13), "Not signed yet.\n\nChanges:\n• Mute this Mac's sound\n• Add benchmarks")

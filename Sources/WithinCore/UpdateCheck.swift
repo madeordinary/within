@@ -6,10 +6,13 @@ public struct ReleaseInfo: Equatable, Sendable {
     public let title: String
     public let notes: String
     public let pageURL: URL
+    /// The release's DMG on GitHub, when it has exactly one; the browser downloads it directly.
+    public let downloadURL: URL?
     public let build: Int
     public let prerelease: Bool
-    public init(tag: String, title: String, notes: String, pageURL: URL, build: Int, prerelease: Bool) {
-        self.tag = tag; self.title = title; self.notes = notes; self.pageURL = pageURL; self.build = build; self.prerelease = prerelease
+    public init(tag: String, title: String, notes: String, pageURL: URL, downloadURL: URL? = nil, build: Int, prerelease: Bool) {
+        self.tag = tag; self.title = title; self.notes = notes; self.pageURL = pageURL; self.downloadURL = downloadURL
+        self.build = build; self.prerelease = prerelease
     }
 }
 
@@ -43,6 +46,7 @@ public enum UpdateCheck {
                   page.scheme == "https", page.host?.lowercased() == "github.com" else { return nil }
             let notes = String((entry["body"] as? String ?? "").prefix(maximumNotesLength))
             return ReleaseInfo(tag: tag, title: entry["name"] as? String ?? tag, notes: notes, pageURL: page,
+                               downloadURL: diskImage(in: entry["assets"] as? [[String: Any]] ?? [], tag: tag),
                                build: build, prerelease: entry["prerelease"] as? Bool ?? false)
         }
         guard let newest = releases.max(by: { $0.build < $1.build }) else { return .noReleases }
@@ -75,6 +79,20 @@ public enum UpdateCheck {
         }
         while lines.last?.isEmpty == true { lines.removeLast() }
         return lines.joined(separator: "\n")
+    }
+
+    /// Only an uploaded .dmg served from this repository's release downloads on github.com counts.
+    /// Anything else, or more than one candidate, leaves the release page as the way to download.
+    static func diskImage(in assets: [[String: Any]], tag: String) -> URL? {
+        let prefix = "/madeordinary/within/releases/download/\(tag)/"
+        let images = assets.compactMap { asset -> URL? in
+            guard asset["state"] as? String ?? "uploaded" == "uploaded",
+                  let name = asset["name"] as? String, name.lowercased().hasSuffix(".dmg"),
+                  let url = (asset["browser_download_url"] as? String).flatMap(URL.init(string:)),
+                  url.scheme == "https", url.host?.lowercased() == "github.com", url.path.hasPrefix(prefix) else { return nil }
+            return url
+        }
+        return images.count == 1 ? images[0] : nil
     }
 
     public static let weeklyInterval: TimeInterval = 7 * 86_400

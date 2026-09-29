@@ -429,9 +429,15 @@ struct HelpView: View {
     }
 }
 
-/// Explicit or opt-in weekly checks. Download opens the release page; nothing installs itself.
+/// Explicit or opt-in weekly checks. Download hands the DMG to the browser; nothing installs itself.
 struct UpdatesPanel: View {
     @ObservedObject var model: AppModel
+    /// Where this copy runs from, so the new one replaces it instead of landing beside it.
+    private var installFolder: String {
+        let folder = Bundle.main.bundleURL.deletingLastPathComponent().path
+        if folder.hasPrefix("/Volumes/") || folder.contains("/AppTranslocation/") { return "Applications" }
+        return (folder as NSString).abbreviatingWithTildeInPath
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
@@ -450,11 +456,12 @@ struct UpdatesPanel: View {
                         Text(notes).font(.system(size: 12)).lineSpacing(2).fixedSize(horizontal: false, vertical: true)
                     }
                     HStack {
-                        Button("Download…") { NSWorkspace.shared.open(release.pageURL) }.primaryAction()
-                            .accessibilityHint("Opens the release page in your browser")
-                        Text("Then quit Within and replace the app in Applications. Your settings, history and notes stay.")
+                        Button("Download…") { NSWorkspace.shared.open(release.downloadURL ?? release.pageURL) }.primaryAction()
+                            .accessibilityHint(release.downloadURL == nil ? "Opens the release page in your browser" : "Downloads the update in your browser")
+                        Text("Then quit Within, open the download and drag Within over the copy in \(installFolder). Your settings, history and notes stay.")
                             .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
                     }
+                    Link("Release page ↗", destination: release.pageURL).font(.system(size: 11))
                 }
             }
             Divider()
