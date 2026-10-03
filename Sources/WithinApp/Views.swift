@@ -470,7 +470,7 @@ struct PillView: View {
     static let height: CGFloat = 52
     @ObservedObject var model: AppModel
     @State private var levels: [CGFloat] = []
-    private let ink = Color(nsColor: NSColor(srgbRed: 0.075, green: 0.094, blue: 0.086, alpha: 1))
+    private let ink = Color(nsColor: NSColor(srgbRed: 0.075, green: 0.075, blue: 0.078, alpha: 1))
     private let mint = Color(nsColor: NSColor(srgbRed: 0.58, green: 0.80, blue: 0.72, alpha: 1))
     private var status: String {
         model.phase == .recording ? (model.audioFlowing ? "Listening" : "Starting mic…") : model.phase == .preparing ? "Preparing…" : "Finishing…"

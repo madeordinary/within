@@ -12,8 +12,9 @@ let size = CGSize(width: 660, height: 540)
 func color(_ hex: Int) -> NSColor {
     NSColor(srgbRed: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255, blue: CGFloat(hex & 255) / 255, alpha: 1)
 }
-let canvas = color(0xF4F1E9), surface = color(0xFFFDF8), line = color(0xCFD3C9)
-let accent = color(0x00624C), text = color(0x1C2B25), secondary = color(0x496857)
+// The app's light palette (Palette in DesignSystem.swift).
+let canvas = color(0xF5F4F0), surface = color(0xFFFFFF), line = color(0xDDDBD6)
+let accent = color(0x00624C), text = color(0x1D1D1F), secondary = color(0x6E6E73)
 
 func serif(_ size: CGFloat) -> NSFont {
     let base = NSFont.systemFont(ofSize: size)

@@ -3,6 +3,8 @@ import SwiftUI
 import WithinCore
 
 /// Application content colors. Window chrome, focus and control behavior stay native.
+/// Surfaces and text are neutral; green is the one signature color, kept for the brand,
+/// selection and the primary action, as in the other Made Ordinary apps.
 enum Palette {
     private static func adaptive(_ light: UInt32, _ dark: UInt32) -> Color {
         Color(nsColor: NSColor(name: nil) { appearance in
@@ -12,16 +14,16 @@ enum Palette {
                            blue: Double(value & 255) / 255, alpha: 1)
         })
     }
-    static let canvas = adaptive(0xF4F1E9, 0x161A18)
-    static let surface = adaptive(0xFFFDF8, 0x212724)
+    static let canvas = adaptive(0xF5F4F0, 0x161616)
+    static let surface = adaptive(0xFFFFFF, 0x1F1F1F)
     static let accent = adaptive(0x00624C, 0x94CDB7)
-    static let onAccent = adaptive(0xFAF7F0, 0x12372A)
-    static let text = adaptive(0x1C2B25, 0xFAF7F0)
-    static let secondary = adaptive(0x496857, 0xB7C5B9)
-    static let tint = adaptive(0xE0E8D6, 0x293F32)
-    static let line = adaptive(0xCFD3C9, 0x4C594D)
+    static let onAccent = adaptive(0xFFFFFF, 0x12372A)
+    static let text = adaptive(0x1D1D1F, 0xF5F5F2)
+    static let secondary = adaptive(0x6E6E73, 0xA1A1A6)
+    static let tint = adaptive(0xE4EDE8, 0x23302A)
+    static let line = adaptive(0xDDDBD6, 0x3A3A3C)
     static let warning = adaptive(0x805212, 0xF2CF88)
-    static let key = adaptive(0xFFFFFF, 0x333B36)
+    static let key = adaptive(0xFFFFFF, 0x2C2C2E)
     static let danger = adaptive(0xA3322B, 0xF2A69E)
 }
 
@@ -30,7 +32,7 @@ enum Typography {
     static func display(_ size: CGFloat = 30) -> Font { .system(size: size, weight: .regular, design: .serif) }
 }
 
-/// Capsule buttons: ink-filled for the one primary action, quiet tint for the rest.
+/// Capsule buttons: accent-filled for the one primary action, quiet tint for the rest.
 struct CapsuleButtonStyle: ButtonStyle {
     var prominent = true
     func makeBody(configuration: Configuration) -> some View { CapsuleLabel(configuration: configuration, prominent: prominent) }
@@ -42,8 +44,8 @@ struct CapsuleButtonStyle: ButtonStyle {
         var body: some View {
             configuration.label.font(.system(size: 13, weight: .medium))
                 .padding(.horizontal, 16).padding(.vertical, 8)
-                .foregroundStyle(prominent ? Palette.canvas : destructive ? Palette.danger : Palette.text)
-                .background(prominent ? AnyShapeStyle(Palette.text) : AnyShapeStyle(Palette.tint.opacity(0.8)), in: Capsule())
+                .foregroundStyle(prominent ? Palette.onAccent : destructive ? Palette.danger : Palette.text)
+                .background(prominent ? AnyShapeStyle(Palette.accent) : AnyShapeStyle(Palette.tint.opacity(0.8)), in: Capsule())
                 .opacity(enabled ? (configuration.isPressed ? 0.78 : 1) : 0.38)
                 .contentShape(Capsule())
         }
