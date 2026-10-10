@@ -291,7 +291,9 @@ public enum DictionaryPolicy {
         let looseApostrophe = scalars.indices.dropFirst().dropLast().contains { position in
             scalars[position] == modifierApostrophe && !(isWordCharacter(scalars[position - 1]) && isWordCharacter(scalars[position + 1]))
         }
-        if misplaced || looseApostrophe { issues.append(.phraseCharacters(index)) }
+        // ":" and "," join digits in text, but a phrase is letters, numbers, spaces, hyphens, apostrophes and periods.
+        let digitJoiner = phrase.unicodeScalars.contains(where: DictionaryTokenizer.isDigitJoiner)
+        if misplaced || looseApostrophe || digitJoiner { issues.append(.phraseCharacters(index)) }
         guard issues.isEmpty else { return (issues, phrase, nil) }
         let path = spans.indices.filter { spans[$0].isWord }.map { position in
             Step(kind: position == 0 ? .start : spans[position - 1].kind, word: DictionaryTokenizer.key(phrase[spans[position].range]))
@@ -331,6 +333,7 @@ enum DictionaryTokenizer {
             let next = scalars.index(after: index)
             let word = isWordScalar(scalars[index])
                 || (inWord && isJoiner(scalars[index]) && next < scalars.endIndex && isWordScalar(scalars[next]))
+                || (inWord && isDigitJoiner(scalars[index]) && next < scalars.endIndex && isDigit(scalars[next]) && isDigit(scalars[scalars.index(before: index)]))
             if word != inWord, index > start {
                 spans.append(span(scalars, start..<index, isWord: inWord))
                 start = index
@@ -374,18 +377,22 @@ enum DictionaryTokenizer {
         }
     }
 
-    static func isApostrophe(_ scalar: Unicode.Scalar) -> Bool { scalar == "'" || scalar == "\u{2019}" || scalar == "\u{2BC}" }
+    /// "‘" is a misused apostrophe often enough ("don‘t") that reading it as one makes a miss, never a wrong change.
+    static func isApostrophe(_ scalar: Unicode.Scalar) -> Bool { scalar == "'" || scalar == "\u{2019}" || scalar == "\u{2BC}" || scalar == "\u{2018}" }
     static func isJoiner(_ scalar: Unicode.Scalar) -> Bool { scalar == "." || isApostrophe(scalar) }
+    /// Times and grouped numbers ("10:42", "1,000") stay one word, so no part of them is ever replaced.
+    static func isDigitJoiner(_ scalar: Unicode.Scalar) -> Bool { scalar == ":" || scalar == "," }
+    static func isDigit(_ scalar: Unicode.Scalar) -> Bool { scalar.properties.generalCategory == .decimalNumber }
 
-    /// Case-folded with no locale, diacritics kept, and both typographic apostrophes read as "'".
+    /// Case-folded with no locale, diacritics kept, and every apostrophe read as "'".
     static func key(_ word: Substring) -> String {
         if word.utf8.allSatisfy({ $0 < 0x80 }) {
             return String(decoding: word.utf8.map { $0 &- 0x41 < 26 ? $0 | 0x20 : $0 }, as: UTF8.self)
         }
         let folded = word.folding(options: [.caseInsensitive], locale: nil)
-        guard folded.unicodeScalars.contains(where: { $0 == "\u{2019}" || $0 == "\u{2BC}" }) else { return folded }
+        guard folded.unicodeScalars.contains(where: { $0 != "'" && isApostrophe($0) }) else { return folded }
         var scalars = String.UnicodeScalarView()
-        for scalar in folded.unicodeScalars { scalars.append(scalar == "\u{2019}" || scalar == "\u{2BC}" ? "'" : scalar) }
+        for scalar in folded.unicodeScalars { scalars.append(isApostrophe(scalar) ? "'" : scalar) }
         return String(scalars)
     }
 }

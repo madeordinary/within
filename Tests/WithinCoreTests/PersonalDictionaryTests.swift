@@ -63,6 +63,22 @@ final class PersonalDictionaryTests: XCTestCase {
         XCTAssertEqual(straight.apply(to: "o’neil’s desk").text, "O'Neil’s desk")
     }
 
+    func testLookAlikeApostropheIsAnApostrophe() {
+        assertUnchanged(["don\u{2018}t"], by: matcher(entry("Dawn", "don")))
+        XCTAssertEqual(matcher(entry("Jira", "gira")).apply(to: "the gira\u{2018}s board").text, "the Jira\u{2018}s board")
+        XCTAssertEqual(matcher(entry("O\u{2019}Neil", "o'neil")).apply(to: "ask o\u{2018}neil").text, "ask O\u{2019}Neil")
+        XCTAssertEqual(matcher(entry("Jira", "gira")).apply(to: "\u{2018}gira\u{2019}").text, "\u{2018}Jira\u{2019}")
+    }
+
+    func testTimesAndGroupedNumbersAreOneWord() {
+        let number = matcher(entry("Forty-two", "42"))
+        assertUnchanged(["10:42", "1,042", "42:10", "42,000"], by: number)
+        XCTAssertEqual(number.apply(to: "at 42, then 43: 42.").text, "at Forty-two, then 43: Forty-two.")
+        XCTAssertEqual(number.apply(to: "a,42 and 42:b").text, "a,Forty-two and Forty-two:b")
+        XCTAssertEqual(issues(entry("Ten forty-two", "10:42")), [.phraseCharacters(0)])
+        XCTAssertEqual(issues(entry("One thousand", "1,000")), [.phraseCharacters(0)])
+    }
+
     func testPeriodJoinedWordsAreNeverSplit() {
         let node = matcher(entry("Node", "node"))
         assertUnchanged(["node.js"], by: node)
