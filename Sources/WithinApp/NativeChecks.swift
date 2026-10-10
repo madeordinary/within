@@ -6,7 +6,7 @@ import WithinCore
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -240,6 +240,130 @@ func nativeChecks(to output: URL) throws {
     preparingNote.cancel(cause: .cancelButton)
     let preparingCancelEnded = preparingNote.phase == .ready && preparingNote.message.contains("canceled before it started")
     let notesGuardsPassed = dictationRefused && secondRecordingRefused && !noteSession.canStart && preparingCancelEnded
+    // Personal dictionary storage in a temporary folder with synthetic words: owner-only, atomic, kept in backups.
+    func mode(_ url: URL) -> Int? { (try? FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber)?.intValue }
+    func names(_ folder: URL) -> [String] { ((try? FileManager.default.contentsOfDirectory(atPath: folder.path)) ?? []).sorted() }
+    let dictionaryFolder = FileManager.default.temporaryDirectory.appendingPathComponent("Within.DictionaryFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dictionaryFolder) }
+    let dictionaryStore = DictionaryStore(directory: dictionaryFolder)
+    let dictionaryFile = dictionaryFolder.appendingPathComponent("personal-dictionary.json")
+    let words = PersonalDictionary(entries: [DictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic", created: Date(timeIntervalSince1970: 1_800_000_000))])
+    var olderWords = words
+    olderWords.version = 0
+    try dictionaryStore.save(olderWords)
+    let dictionaryOwnerOnly = mode(dictionaryFile) == 0o600 && mode(dictionaryFolder) == 0o700
+    let dictionaryInBackups = try dictionaryFolder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup != true
+        && dictionaryFile.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup != true
+    let dictionaryReloaded = dictionaryStore.load() == .loaded(words) && names(dictionaryFolder) == ["personal-dictionary.json"]
+    let staleStaging = dictionaryFolder.appendingPathComponent(".personal-dictionary-\(UUID().uuidString).tmp")
+    FileManager.default.createFile(atPath: staleStaging.path, contents: Data("{".utf8))
+    let staleSwept = dictionaryStore.load() == .loaded(words) && names(dictionaryFolder) == ["personal-dictionary.json"]
+    // Too large, broken or newer files are reported and left byte for byte; the size limit itself still loads.
+    let saved = try Data(contentsOf: dictionaryFile)
+    let padded = { (size: Int) in saved + Data(repeating: 0x20, count: size - saved.count) }
+    var dictionaryLoadsPassed = true
+    for (bytes, expected) in [(padded(PersonalDictionary.maximumFileSize), DictionaryStore.Loaded.loaded(words)),
+                              (padded(PersonalDictionary.maximumFileSize + 1), .unreadable),
+                              (Data(#"{"version": 1, "enabled": tru"#.utf8), .unreadable),
+                              (Data(#"{"version": 2, "words": {"synthetic": [1]}}"#.utf8), .newerVersion)] {
+        try bytes.write(to: dictionaryFile)
+        dictionaryLoadsPassed = dictionaryStore.load() == expected && (try? Data(contentsOf: dictionaryFile)) == bytes && dictionaryLoadsPassed
+    }
+    // Every save makes the folder owner-only again, whatever it was left as.
+    try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dictionaryFolder.path)
+    try dictionaryStore.save(words)
+    let folderTightened = mode(dictionaryFolder) == 0o700
+    let firstAside = try dictionaryStore.setAside()
+    try dictionaryStore.save(words)
+    let secondAside = try dictionaryStore.setAside()
+    let setAsideKept = firstAside != secondAside && !FileManager.default.fileExists(atPath: dictionaryFile.path)
+        && dictionaryStore.setAsideFiles().map(\.lastPathComponent) == [firstAside, secondAside].map(\.lastPathComponent).sorted()
+        && [firstAside, secondAside].allSatisfy { mode($0) == 0o600 && (try? Data(contentsOf: $0)).map(PersonalDictionary.decode) == .loaded(words) }
+    try dictionaryStore.save(words)
+    FileManager.default.createFile(atPath: staleStaging.path, contents: nil)
+    try dictionaryStore.removeAll()
+    let dictionaryRemoved = names(dictionaryFolder).isEmpty && dictionaryStore.load() == .missing
+    // First launch: no folder at all is an empty dictionary, and deleting it is not a failure.
+    let absent = DictionaryStore(directory: dictionaryFolder.appendingPathComponent("Absent.noindex", isDirectory: true))
+    let firstLaunchEmpty = absent.load() == .missing && (try? absent.removeAll()) != nil && names(dictionaryFolder).isEmpty
+    let dictionaryStorePassed = dictionaryOwnerOnly && dictionaryInBackups && dictionaryReloaded && staleSwept
+        && dictionaryLoadsPassed && folderTightened && setAsideKept && dictionaryRemoved && firstLaunchEmpty
+    // A file Within can't use is never written over by any change the model offers. Once set aside, saving works again.
+    let protectedBase = FileManager.default.temporaryDirectory.appendingPathComponent("Within.DictionaryProtectedFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: protectedBase) }
+    let protectedFolder = protectedBase.appendingPathComponent("Dictionary.noindex", isDirectory: true)
+    let protectedFile = protectedFolder.appendingPathComponent("personal-dictionary.json")
+    try FileManager.default.createDirectory(at: protectedFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    var dictionaryProtectedPassed = true
+    for (bytes, state) in [(Data(#"{"version": 1, "enabled": tru"#.utf8), DictionaryState.unreadable),
+                           (Data(#"{"version": 2, "words": {"synthetic": [1]}}"#.utf8), .newerVersion)] {
+        // A hand-made file is often 0644; once set aside it is owner-only.
+        try bytes.write(to: protectedFile)
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: protectedFile.path)
+        let model = AppModel(manifest: manifest, base: protectedBase, dictionaryFixture: true)
+        let opened = model.dictionaryState == state && model.dictionaryStore != nil && model.dictionaryMatcher.isEmpty
+        model.setDictionaryEnabled(false)
+        _ = model.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic")
+        _ = model.updateDictionaryEntry(UUID(), heardAs: ["synthetic word"], writeAs: "Synthetic")
+        model.setDictionaryEntry(UUID(), enabled: false)
+        model.deleteDictionaryEntry(UUID())
+        model.deleteAllDictionaryEntries()
+        let untouched = (try? Data(contentsOf: protectedFile)) == bytes && names(protectedFolder) == ["personal-dictionary.json"]
+            && model.dictionaryState == state && model.dictionary == PersonalDictionary() && model.dictionaryMatcher.isEmpty
+        model.startNewDictionary()
+        let aside = model.dictionaryStore?.setAsideFiles() ?? []
+        let keptAside = aside.count == 1 && (try? Data(contentsOf: aside[0])) == bytes && mode(aside[0]) == 0o600
+            && model.dictionaryHasSetAside && model.dictionaryState == .missing
+        let savesAgain = model.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic").isEmpty && model.dictionaryState == .loaded
+            && model.dictionaryStore?.load() == .loaded(model.dictionary) && !model.dictionaryMatcher.isEmpty
+        model.deleteDictionaryFiles()
+        let cleared = names(protectedFolder).isEmpty && model.dictionaryState == .missing && !model.dictionaryHasSetAside
+        dictionaryProtectedPassed = opened && untouched && keptAside && savesAgain && cleared && dictionaryProtectedPassed
+    }
+    // A folder Within can't search is not an empty dictionary: nothing is saved over the file, and nothing claims it was deleted.
+    try DictionaryStore(directory: protectedFolder).save(words)
+    let reachable = try Data(contentsOf: protectedFile)
+    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: protectedFolder.path)
+    let blocked = AppModel(manifest: manifest, base: protectedBase, dictionaryFixture: true)
+    let blockedOpened = blocked.dictionaryState == .unreadable && blocked.dictionaryMatcher.isEmpty
+        && (try? DictionaryStore(directory: protectedFolder).removeAll()) == nil
+    blocked.setDictionaryEnabled(false)
+    _ = blocked.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic")
+    blocked.deleteDictionaryFiles()
+    // Restored before anything is read back, and so the folder can be removed; nothing since the change above can throw.
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: protectedFolder.path)
+    let unreachableKept = blockedOpened && (try? Data(contentsOf: protectedFile)) == reachable && names(protectedFolder) == ["personal-dictionary.json"]
+        && blocked.dictionaryState == .unreadable && blocked.dictionaryMessage.contains("couldn’t be deleted")
+    dictionaryProtectedPassed = unreachableKept && dictionaryProtectedPassed
+    // Previews change the dictionary in memory only: no store, no file under the unused base, no preference written.
+    let dictionaryPreview = fixture("ready")
+    let unusedDictionary = output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Dictionary.noindex")
+    let offStaysEmpty = dictionaryPreview.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic").isEmpty
+        && dictionaryPreview.dictionary.entries.count == 1 && dictionaryPreview.dictionaryMatcher.isEmpty
+    dictionaryPreview.previewDictionary(.missing)
+    let typedSaved = dictionaryPreview.addDictionaryEntry(heardAs: ["  synthetic   word ", "", "synthetic wurd"], writeAs: " Synthetic ").isEmpty
+    let typed = dictionaryPreview.dictionary.entries.first
+    let normalizedSaved = dictionaryPreview.dictionary.entries.count == 1 && typed?.writeAs == "Synthetic"
+        && typed?.heardAs == ["synthetic word", "synthetic wurd"] && dictionaryPreview.dictionaryMatcher.apply(to: "a synthetic wurd").text == "a Synthetic"
+    let rawRefused = dictionaryPreview.addDictionaryEntry(heardAs: ["", "other\tword"], writeAs: "Other\t") == [.multilineWriteAs, .phraseCharacters(1)]
+    let typedID = typed?.id ?? UUID()
+    let updated = dictionaryPreview.updateDictionaryEntry(typedID, heardAs: ["synthetic phrase"], writeAs: "Synthetic").isEmpty
+        && dictionaryPreview.dictionaryMatcher.apply(to: "a synthetic phrase").text == "a Synthetic"
+    dictionaryPreview.setDictionaryEntry(typedID, enabled: false)
+    let entryOff = dictionaryPreview.dictionary.entries.first?.enabled == false && dictionaryPreview.dictionaryMatcher.isEmpty
+    dictionaryPreview.deleteDictionaryEntry(typedID)
+    let entryDeleted = dictionaryPreview.dictionary.entries.isEmpty
+    _ = dictionaryPreview.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic")
+    dictionaryPreview.setDictionaryEnabled(false)
+    let switchedOff = !dictionaryPreview.dictionary.enabled && dictionaryPreview.dictionary.entries.count == 1 && dictionaryPreview.dictionaryMatcher.isEmpty
+    dictionaryPreview.deleteAllDictionaryEntries()
+    let previewCleared = dictionaryPreview.dictionary == PersonalDictionary() && dictionaryPreview.dictionaryState == .missing
+    _ = dictionaryPreview.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic")
+    dictionaryPreview.configurePreview("ready")
+    let previewReset = dictionaryPreview.dictionary == PersonalDictionary() && !dictionaryPreview.showsPersonalDictionary
+    let dictionaryPreviewPassed = offStaysEmpty && typedSaved && normalizedSaved && rawRefused && updated && entryOff && entryDeleted
+        && switchedOff && previewCleared && previewReset && dictionaryPreview.dictionaryStore == nil
+        && !FileManager.default.fileExists(atPath: unusedDictionary.path)
     // Previews never reach the network or store update choices.
     let updatePreview = fixture("update-available")
     updatePreview.checkForUpdates()
@@ -297,9 +421,12 @@ func nativeChecks(to output: URL) throws {
         "historyRetentionPreviewPassed": historyPolicyPassed,
         "notesStoreOwnerOnlyAtomicPassed": notesStorePassed,
         "notesOneCaptureAtATimePassed": notesGuardsPassed,
+        "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
+        "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
+        "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && updatesPassed,
-        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch"]]
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && updatesPassed,
+        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

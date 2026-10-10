@@ -29,6 +29,7 @@ Sources/WithinApp/AppDelegate.swift
 Sources/WithinApp/AppleSpeechBenchmark.swift
 Sources/WithinApp/AppModel.swift
 Sources/WithinApp/DesignSystem.swift
+Sources/WithinApp/DictionaryStore.swift
 Sources/WithinApp/HistoryStore.swift
 Sources/WithinApp/HistoryView.swift
 Sources/WithinApp/SettingsView.swift

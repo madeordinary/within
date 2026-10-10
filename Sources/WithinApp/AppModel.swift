@@ -61,6 +61,14 @@ final class AppModel: ObservableObject {
     @Published private(set) var liveConfirmed = ""
     @Published private(set) var liveVolatile = ""
     @Published private(set) var notesMessage = ""
+    /// Personal dictionary, behind the hidden developer default `showPersonalDictionary`. Off: no file is read and nothing changes words.
+    @Published private(set) var showsPersonalDictionary: Bool
+    @Published private(set) var dictionary = PersonalDictionary()
+    @Published private(set) var dictionaryState = DictionaryState.missing
+    @Published private(set) var dictionaryIssues: [UUID: [DictionaryIssue]] = [:]
+    @Published private(set) var dictionaryHasSetAside = false
+    @Published private(set) var dictionaryMessage = ""
+    private(set) var dictionaryMatcher = DictionaryMatcher.empty
     /// Update checks: `nil` means not chosen, which behaves as off. Nothing installs itself.
     @Published private(set) var automaticUpdateChecks: Bool?
     @Published private(set) var updateResult: UpdateCheckResult?
@@ -91,6 +99,7 @@ final class AppModel: ObservableObject {
     private var historyStore: HistoryStore?
     private var historyTimer: Timer?
     private var notesStore: NotesStore?
+    private(set) var dictionaryStore: DictionaryStore?
     private var pendingNoteGap: String?
     private var noteSaveTasks: [UUID: Task<Void, Never>] = [:]
     private var updateTimer: Timer?
@@ -140,7 +149,8 @@ final class AppModel: ObservableObject {
         return hasActivePracticeSession && session.isCurrent(sessionID)
     }
 
-    init(manifest: ModelManifest, base: URL, preview: Bool = false) {
+    /// `dictionaryFixture` is for native checks: nothing starts, and only the dictionary under `base` is read and saved.
+    init(manifest: ModelManifest, base: URL, preview: Bool = false, dictionaryFixture: Bool = false) {
         self.manifest = manifest
         previewMode = preview
         store = ModelStore(manifest: manifest, base: base)
@@ -153,7 +163,9 @@ final class AppModel: ObservableObject {
         setupComplete = UserDefaults.standard.bool(forKey: "setupComplete")
         historyRetention = .restored(from: UserDefaults.standard.string(forKey: "historyRetention"))
         automaticUpdateChecks = UserDefaults.standard.object(forKey: "automaticUpdateChecks") as? Bool
+        showsPersonalDictionary = dictionaryFixture || UserDefaults.standard.bool(forKey: "showPersonalDictionary")
         if preview { return }
+        if dictionaryFixture { openDictionary(base); return }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.runAutomaticUpdateCheckIfDue() }
         }
@@ -166,6 +178,7 @@ final class AppModel: ObservableObject {
         loadHistory()
         notesStore = NotesStore(directory: base.appendingPathComponent("Notes", isDirectory: true))
         loadNotes()
+        if showsPersonalDictionary { openDictionary(base) }
         historyTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.pruneHistory() }
         }
@@ -593,6 +606,122 @@ final class AppModel: ObservableObject {
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
 
+    // MARK: Personal dictionary
+
+    /// A file that couldn't be read, or came from a newer version, can only be set aside or deleted.
+    var canEditDictionary: Bool { dictionaryState == .missing || dictionaryState == .loaded }
+    /// Checks exactly what was typed, then saves it normalized. Issue positions match the fields given;
+    /// blank fields are ignored. Returns the issues to show; none means the word was saved.
+    func addDictionaryEntry(heardAs: [String], writeAs: String) -> [DictionaryIssue] {
+        guard canEditDictionary else { return [] }
+        let entry = DictionaryEntry(heardAs: heardAs, writeAs: writeAs, created: Date())
+        let issues = DictionaryPolicy.editorIssues(for: entry, in: dictionary)
+        guard issues.isEmpty else { return issues }
+        dictionary.entries.append(Self.normalized(entry))
+        dictionaryChanged()
+        return []
+    }
+    func updateDictionaryEntry(_ id: UUID, heardAs: [String], writeAs: String) -> [DictionaryIssue] {
+        guard canEditDictionary, let index = dictionary.entries.firstIndex(where: { $0.id == id }) else { return [] }
+        var entry = dictionary.entries[index]
+        entry.heardAs = heardAs; entry.writeAs = writeAs
+        let issues = DictionaryPolicy.editorIssues(for: entry, in: dictionary)
+        guard issues.isEmpty else { return issues }
+        entry.modified = Date()
+        dictionary.entries[index] = Self.normalized(entry)
+        dictionaryChanged()
+        return []
+    }
+    func setDictionaryEntry(_ id: UUID, enabled: Bool) {
+        guard canEditDictionary, let index = dictionary.entries.firstIndex(where: { $0.id == id }),
+              dictionary.entries[index].enabled != enabled else { return }
+        dictionary.entries[index].enabled = enabled; dictionary.entries[index].modified = Date()
+        dictionaryChanged()
+    }
+    func deleteDictionaryEntry(_ id: UUID) {
+        guard canEditDictionary, dictionary.entries.contains(where: { $0.id == id }) else { return }
+        dictionary.entries.removeAll { $0.id == id }
+        dictionaryChanged()
+        // A failed save has already announced itself; don't talk over it.
+        if dictionaryMessage.isEmpty { announce("Word deleted from your dictionary") }
+    }
+    func setDictionaryEnabled(_ enabled: Bool) {
+        guard canEditDictionary, dictionary.enabled != enabled else { return }
+        dictionary.enabled = enabled; dictionaryChanged()
+    }
+    func deleteAllDictionaryEntries() {
+        guard canEditDictionary else { return }
+        deleteDictionaryFiles()
+    }
+    /// Also offered while the file can't be used. Memory goes back to defaults only after every file is gone.
+    func deleteDictionaryFiles() {
+        if !previewMode, let dictionaryStore {
+            do { try dictionaryStore.removeAll() }
+            catch { reloadDictionary(after: "Your dictionary couldn’t be deleted. Nothing was changed."); return }
+        }
+        replaceDictionary(with: .missing); dictionaryHasSetAside = false; dictionaryMessage = ""
+        announce("Dictionary cleared")
+    }
+    /// Only while the file can't be used: keeps it under a new name in the same folder and starts empty.
+    func startNewDictionary() {
+        guard !canEditDictionary else { return }
+        if !previewMode, let dictionaryStore {
+            do { _ = try dictionaryStore.setAside() }
+            catch { reloadDictionary(after: "Your dictionary file couldn’t be renamed. It was left untouched."); return }
+        }
+        replaceDictionary(with: .missing); dictionaryHasSetAside = true; dictionaryMessage = ""
+    }
+    /// Previews and native checks: the dictionary as the developer default shows it. Nothing is read or written.
+    func previewDictionary(_ loaded: DictionaryStore.Loaded) {
+        guard previewMode else { return }
+        showsPersonalDictionary = true; replaceDictionary(with: loaded)
+    }
+    private func openDictionary(_ base: URL) {
+        dictionaryStore = DictionaryStore(directory: base.appendingPathComponent("Dictionary.noindex", isDirectory: true))
+        loadDictionary()
+    }
+    private func loadDictionary() {
+        guard let dictionaryStore else { return }
+        replaceDictionary(with: dictionaryStore.load())
+        dictionaryHasSetAside = !dictionaryStore.setAsideFiles().isEmpty
+    }
+    /// After a failed delete or rename, shows what is on disk now, and the failure while the file is still there.
+    private func reloadDictionary(after failure: String) {
+        loadDictionary()
+        dictionaryMessage = dictionaryState == .missing ? "" : failure
+        if !dictionaryMessage.isEmpty { announce(dictionaryMessage) }
+    }
+    private func replaceDictionary(with loaded: DictionaryStore.Loaded) {
+        switch loaded {
+        case .loaded(let saved): dictionary = saved; dictionaryState = .loaded
+        case .missing: dictionary = PersonalDictionary(); dictionaryState = .missing
+        case .unreadable: dictionary = PersonalDictionary(); dictionaryState = .unreadable
+        case .newerVersion: dictionary = PersonalDictionary(); dictionaryState = .newerVersion
+        }
+        refreshDictionary()
+    }
+    private func dictionaryChanged() { refreshDictionary(); persistDictionary() }
+    /// Issues and the matcher always follow the entries. Off, or while the file can't be used, nothing changes words.
+    private func refreshDictionary() {
+        dictionaryIssues = DictionaryPolicy.loadIssues(dictionary)
+        dictionaryMatcher = showsPersonalDictionary && canEditDictionary ? DictionaryMatcher(dictionary) : .empty
+    }
+    /// The only save path. It never writes over a file that couldn't be read or came from a newer version.
+    private func persistDictionary() {
+        guard !previewMode, let dictionaryStore, canEditDictionary else { return }
+        do { try dictionaryStore.save(dictionary); dictionaryState = .loaded; dictionaryMessage = "" }
+        catch {
+            dictionaryMessage = "Your dictionary couldn’t be saved on this Mac. Your change applies until you quit."
+            announce(dictionaryMessage)
+        }
+    }
+    private static func normalized(_ entry: DictionaryEntry) -> DictionaryEntry {
+        var copy = entry
+        copy.writeAs = DictionaryPolicy.normalized(entry.writeAs)
+        copy.heardAs = entry.heardAs.map(DictionaryPolicy.normalized).filter { !$0.isEmpty }
+        return copy
+    }
+
     // MARK: Mute while dictating
 
     private var selfBundleID: String { Bundle.main.bundleIdentifier ?? "com.madeordinary.Within" }
@@ -979,6 +1108,7 @@ final class AppModel: ObservableObject {
         mode = .toggle; dictationShortcut = .controlShiftD; microphoneUID = "preview-input"
         historyRetention = nil; history = []
         automaticUpdateChecks = nil; updateResult = nil
+        showsPersonalDictionary = false; dictionaryHasSetAside = false; dictionaryMessage = ""; replaceDictionary(with: .missing)
         if state == "update-available" {
             automaticUpdateChecks = true
             updateResult = .available(ReleaseInfo(tag: "v0.1.0-build12", title: "Within 0.1.0 (build 12)",
