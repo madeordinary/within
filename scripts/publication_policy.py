@@ -63,6 +63,7 @@ Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
 Sources/WithinCore/Notes.swift
 Sources/WithinCore/OutputMute.swift
+Sources/WithinCore/PersonalDictionary.swift
 Sources/WithinCore/SessionState.swift
 Sources/WithinCore/ShortcutGesture.swift
 Sources/WithinCore/UpdateCheck.swift
@@ -77,6 +78,7 @@ Tests/WithinCoreTests/MeetingsTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift
 Tests/WithinCoreTests/NotesTests.swift
 Tests/WithinCoreTests/OutputMuteTests.swift
+Tests/WithinCoreTests/PersonalDictionaryTests.swift
 Tests/WithinCoreTests/ShortcutTests.swift
 Tests/WithinCoreTests/SystemBoundaryTests.swift
 Tests/WithinCoreTests/UpdateCheckTests.swift
