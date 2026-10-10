@@ -97,15 +97,16 @@ struct SidebarView: View {
             // The open section carries the highlight; the Settings row stays bold without a second fill.
             item("Settings", icon: "gearshape", selected: page == .settings, filled: false) { navigate(.settings) }
             if page == .settings {
-                ForEach(SettingsView.sections, id: \.0) { name, icon in
-                    item(name, icon: icon, selected: model.settingsSection == name, indent: true) { openSettings(name) }
+                ForEach(SettingsView.sections(showingDictionary: model.showsPersonalDictionary), id: \.0) { name, icon in
+                    item(name, icon: icon, selected: model.settingsSection == name, indent: true,
+                         attention: name == "Dictionary" && model.dictionaryAttentionLine != nil) { openSettings(name) }
                 }
             }
             item("Help", icon: "questionmark.circle", selected: page == .help) { navigate(.help) }
         }.padding(.horizontal, 10).padding(.bottom, 14).frame(width: 196)
     }
     private func item(_ title: String, icon: String, selected: Bool, indent: Bool = false, emphasized: Bool = false,
-                      filled: Bool = true, action: @escaping () -> Void) -> some View {
+                      filled: Bool = true, attention: Bool = false, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 9) {
                 Image(systemName: icon).frame(width: 18)
@@ -113,6 +114,10 @@ struct SidebarView: View {
                 Text(title)
                 Spacer(minLength: 0)
                 if emphasized { Circle().fill(Palette.accent).frame(width: 7, height: 7).accessibilityHidden(true) }
+                if attention {
+                    Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Palette.warning)
+                        .accessibilityLabel("Needs attention")
+                }
             }.font(.system(size: indent ? 12 : 13, weight: selected ? .semibold : .regular))
                 .padding(.leading, indent ? 20 : 10).padding(.trailing, 10).padding(.vertical, indent ? 5 : 7)
                 .background(selected && filled ? Palette.tint : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
@@ -173,6 +178,15 @@ struct MainView: View {
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
                     SessionStatusView(model: model, focusRequest: statusFocusRequest)
+                    // The dictionary can't do what the user set up; the words are written as transcribed.
+                    if let line = model.dictionaryAttentionLine {
+                        HStack(spacing: 10) {
+                            Label(line, systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Palette.warning)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 8)
+                            Button("Open dictionary", action: model.openDictionarySettings).quietAction()
+                        }
+                    }
                     if model.lastDictationChange != nil || model.lastChangeExpiredWhileFocused {
                         LastDictationChangeRow(model: model, focus: $changeFocus, voiceOverFocus: $changeVoiceOverFocus) { statusFocusRequest += 1 }
                             .id("lastChange")

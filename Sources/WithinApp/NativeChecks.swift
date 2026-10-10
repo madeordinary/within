@@ -335,10 +335,13 @@ func nativeChecks(to output: URL) throws {
     blocked.setDictionaryEnabled(false)
     _ = blocked.addDictionaryEntry(heardAs: ["synthetic word"], writeAs: "Synthetic")
     blocked.deleteDictionaryFiles()
+    // Show in Finder can't see the file in a folder Within can't search, so it selects the folder.
+    let blockedShowsFolder = DictionaryStore(directory: protectedFolder).shownInFinder(setAside: false) == [protectedFolder]
     // Restored before anything is read back, and so the folder can be removed; nothing since the change above can throw.
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: protectedFolder.path)
     let unreachableKept = blockedOpened && (try? Data(contentsOf: protectedFile)) == reachable && names(protectedFolder) == ["personal-dictionary.json"]
         && blocked.dictionaryState == .unreadable && blocked.dictionaryMessage.contains("couldn’t be deleted")
+        && blockedShowsFolder && DictionaryStore(directory: protectedFolder).shownInFinder(setAside: false) == [protectedFile]
     dictionaryProtectedPassed = unreachableKept && dictionaryProtectedPassed
     // Previews change the dictionary in memory only: no store, no file under the unused base, no preference written.
     let dictionaryPreview = fixture("ready")
@@ -489,6 +492,20 @@ func nativeChecks(to output: URL) throws {
     }
     let emptyDictionaryLeavesDictationUnchangedPassed = emptyDictionaryPassed && defaultOff.dictionary.entries.count == 1
         && matchers.allSatisfy { $0.isEmpty && $0.apply(to: transcribed) == DictionaryResult(unchanged: transcribed) }
+    // The Dictation space says when the dictionary can't be used, with a way to open it. Counts only, never words.
+    let unreadableLine = fixture("dictation-dictionary-unreadable")
+    var openedDictionary = false
+    unreadableLine.showDictionarySettings = { openedDictionary = true; unreadableLine.settingsSection = "Dictionary" }
+    let unreadableText = unreadableLine.dictionaryAttentionLine
+    unreadableLine.openDictionarySettings()
+    unreadableLine.showDictionarySettings = nil
+    let newerLine = fixture("ready")
+    newerLine.previewDictionary(.newerVersion)
+    let dictionaryUnreadableLineShownPassed = unreadableText == "Your dictionary couldn’t be read, so words are written as transcribed."
+        && unreadableLine.dictionaryState == .unreadable && openedDictionary && unreadableLine.settingsSection == "Dictionary"
+        && newerLine.dictionaryAttentionLine == unreadableText
+        && fixture("dictionary").dictionaryAttentionLine == "1 dictionary word needs attention and isn’t being used."
+        && fixture("dictionary-empty").dictionaryAttentionLine == nil && fixture("ready").dictionaryAttentionLine == nil
     // Previews never reach the network or store update choices.
     let updatePreview = fixture("update-available")
     updatePreview.checkForUpdates()
@@ -553,9 +570,10 @@ func nativeChecks(to output: URL) throws {
         "dictionaryCopyOriginalPassed": dictionaryCopyOriginalPassed,
         "dictionaryPracticeRestorePassed": dictionaryPracticeRestorePassed,
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
+        "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && updatesPassed,
-        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder"]]
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Open dictionary navigation from the Dictation space in the running app"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

@@ -265,6 +265,10 @@ struct SettingsView: View {
     @State private var confirmingClear = false
     @State private var pendingRetention: HistoryRetention?
     static let sections = [("General", "slider.horizontal.3"), ("Audio", "mic"), ("History", "clock.arrow.circlepath"), ("Privacy", "hand.raised"), ("Model", "internaldrive"), ("About", "info.circle")]
+    /// Dictionary sits after Audio, and only behind the developer default.
+    static func sections(showingDictionary: Bool) -> [(String, String)] {
+        showingDictionary ? Array(sections.prefix(2)) + [("Dictionary", "character.book.closed")] + sections.dropFirst(2) : sections
+    }
     var body: some View {
             page {
                 switch model.settingsSection {
@@ -315,6 +319,7 @@ struct SettingsView: View {
                     Label("On-device transcription", systemImage: "desktopcomputer")
                     Label(model.effectiveRetention.keepsHistory ? "No recordings saved · dictation history stays on this Mac" : "No recordings or dictation history saved", systemImage: "clock.badge.xmark")
                     Label("No account, analytics, or cloud fallback", systemImage: "lock.shield")
+                    if model.showsPersonalDictionary { Label("Your dictionary is never uploaded", systemImage: "character.book.closed") }
                     Text("Audio and pending words stay in memory. Copy uses your clipboard only when you choose it. Quitting clears pending text.")
                         .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                 }.withinSurface()
@@ -332,6 +337,8 @@ struct SettingsView: View {
             case "Model":
                 heading("One local speech model", detail: "Prepare it once. Dictate without a network connection.")
                 ModelPanel(model: model).withinSurface()
+            case "Dictionary" where model.showsPersonalDictionary:
+                DictionaryPage(model: model)
             case "About":
                 Brand()
                 Text("A little more room to think.").font(Typography.display(24))
@@ -415,6 +422,10 @@ struct HelpView: View {
                 help("Try it here first", icon: "waveform", text: "Expand Try dictation on Home. Opening the practice area does not record; choose Start practice or use the shortcut while the area is open and Within is active. Your practice words stay until you clear them or quit.")
                 Button("Try dictation") { model.showPractice?() }.disabled(model.workerBusy)
                 help("When words need review", icon: "text.bubble", text: "If the destination changes or insertion is uncertain, Within keeps your words for review. Return rechecks the original field. Copy uses the clipboard only when you choose it. Closing recovery keeps pending words in memory; Discard removes them after confirmation.")
+                if model.showsPersonalDictionary {
+                    help("Your words, your spelling", icon: "character.book.closed", text: "Add names and terms in Settings → Dictionary. After transcription, Within replaces whole words you listed, in any capitalization, with your spelling. It applies to dictation and practice. When your words need review, choose Use original transcription to see what Within first wrote. After an insertion, the Dictation space and the menu bar offer the original transcription for a few minutes; copy it and replace the text yourself if you need to.")
+                    Button("Open dictionary", action: model.openDictionarySettings)
+                }
                 help("Check the selected microphone", icon: "mic", text: "If an input disappears, reconnect it or choose another in Settings → Audio. Within does not switch devices or restart capture silently.")
                 help("One window, fewer interruptions", icon: "macwindow", text: "Dictation, Settings and Help share this window’s sidebar. Command-comma opens Settings. Closing the window leaves Within in the Dock and menu bar; Quit Within exits completely and asks before discarding active or pending dictation.")
                 help("Made to stay local", icon: "lock.shield", text: "The speech model is a separate, explicit download. Dictation itself runs on your Mac. No recordings are saved. Dictation history is kept only if you turn it on, only on this Mac, for as long as you choose. This engineering preview has no automatic updater.")
@@ -458,7 +469,7 @@ struct UpdatesPanel: View {
                     HStack {
                         Button("Download…") { NSWorkspace.shared.open(release.downloadURL ?? release.pageURL) }.primaryAction()
                             .accessibilityHint(release.downloadURL == nil ? "Opens the release page in your browser" : "Downloads the update in your browser")
-                        Text("Then quit Within, open the download and drag Within over the copy in \(installFolder). Your settings, history and notes stay.")
+                        Text("Then quit Within, open the download and drag Within over the copy in \(installFolder). Your settings, \(model.showsPersonalDictionary ? "dictionary, " : "")history and notes stay.")
                             .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
                     }
                     Link("Release page ↗", destination: release.pageURL).font(.system(size: 11))
@@ -468,7 +479,7 @@ struct UpdatesPanel: View {
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Check automatically once a week").font(.system(size: 13, weight: .medium))
-                    Text("Sends one request to GitHub (api.github.com). No dictation, notes, history or usage data. Off unless you turn it on.")
+                    Text("Sends one request to GitHub (api.github.com). No dictation, \(model.showsPersonalDictionary ? "dictionary, " : "")notes, history or usage data. Off unless you turn it on.")
                         .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 12)

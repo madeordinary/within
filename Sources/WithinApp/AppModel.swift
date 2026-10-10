@@ -122,6 +122,7 @@ final class AppModel: ObservableObject {
     var showAudioSettings: (() -> Void)?
     var showModelSettings: (() -> Void)?
     var showHistorySettings: (() -> Void)?
+    var showDictionarySettings: (() -> Void)?
     var showAboutSettings: (() -> Void)?
     var showHelp: (() -> Void)?
     var showSetup: (() -> Void)?
@@ -769,6 +770,23 @@ final class AppModel: ObservableObject {
         }
         replaceDictionary(with: .missing); dictionaryHasSetAside = true; dictionaryMessage = ""
     }
+    /// The Dictation space's line while the dictionary can't do what the user set up. Counts only, never words.
+    var dictionaryAttentionLine: String? {
+        guard showsPersonalDictionary else { return nil }
+        guard canEditDictionary else { return "Your dictionary couldn’t be read, so words are written as transcribed." }
+        switch dictionaryIssues.count {
+        case 0: return nil
+        case 1: return "1 dictionary word needs attention and isn’t being used."
+        case let count: return "\(count) dictionary words need attention and aren’t being used."
+        }
+    }
+    func openDictionarySettings() { showDictionarySettings?() }
+    /// Selects Within's own dictionary files in Finder: the saved file, or the earlier ones it kept. Nothing is opened or read.
+    func showDictionaryFilesInFinder(setAside: Bool) {
+        guard !previewMode, let dictionaryStore else { return }
+        let files = dictionaryStore.shownInFinder(setAside: setAside)
+        if !files.isEmpty { NSWorkspace.shared.activateFileViewerSelecting(files) }
+    }
     /// Previews and native checks: the dictionary as the developer default shows it. Nothing is read or written.
     func previewDictionary(_ loaded: DictionaryStore.Loaded) {
         guard previewMode else { return }
@@ -1111,7 +1129,7 @@ final class AppModel: ObservableObject {
         }
         stateChanged?()
     }
-    private func announce(_ text: String) {
+    func announce(_ text: String) {
         NSAccessibility.post(element: NSApp as Any, notification: .announcementRequested, userInfo: [.announcement: text, .priority: NSAccessibilityPriorityLevel.high.rawValue])
     }
     private func installLifecycleObservers() {
@@ -1209,6 +1227,11 @@ final class AppModel: ObservableObject {
         DictionaryEntry(heardAs: ["shivon", "chevonne"], writeAs: "Siobhan", created: Date(timeIntervalSince1970: 1_800_000_001)),
         DictionaryEntry(heardAs: ["cube cuddle", "cube control"], writeAs: "kubectl", created: Date(timeIntervalSince1970: 1_800_000_002))
     ])
+    /// The Dictionary page's synthetic words: one turned off, and one from a hand-edited file that repeats an earlier word's phrase.
+    static let previewPageWords = PersonalDictionary(entries: previewWords.entries + [
+        DictionaryEntry(heardAs: ["postgres q l", "gira"], writeAs: "PostgreSQL", created: Date(timeIntervalSince1970: 1_800_000_003)),
+        DictionaryEntry(heardAs: ["made ordinarily"], writeAs: "Made Ordinary", enabled: false, created: Date(timeIntervalSince1970: 1_800_000_004))
+    ])
     func configurePreview(_ state: String) {
         guard previewMode else { return }
         modelBusy = false; workerBusy = false
@@ -1218,6 +1241,9 @@ final class AppModel: ObservableObject {
         showsPersonalDictionary = false; dictionaryHasSetAside = false; dictionaryMessage = ""; replaceDictionary(with: .missing)
         lastChangeExpiry?.cancel(); lastDictationChange = nil; lastChangeCopyFailed = false; lastChangeExpiredWhileFocused = false; practiceChange = nil
         if state.hasSuffix("-dictionary") { previewDictionary(.loaded(Self.previewWords)) }
+        if state == "dictionary" || state == "dictionary-recording" { previewDictionary(.loaded(Self.previewPageWords)) }
+        if state == "dictionary-empty" { previewDictionary(.missing) }
+        if state == "dictionary-unreadable" || state == "dictation-dictionary-unreadable" { previewDictionary(.unreadable) }
         if state == "update-available" {
             automaticUpdateChecks = true
             updateResult = .available(ReleaseInfo(tag: "v0.1.0-build12", title: "Within 0.1.0 (build 12)",
@@ -1287,7 +1313,7 @@ final class AppModel: ObservableObject {
             // The same step as a dictation result: with no dictionary in use, the words are unchanged.
             let id = session.begin()!; _ = session.recover(dictionaryMatcher.apply(to: words), id: id)
             recoveryReason = .focusChanged; recoveryDetail = RecoveryReason.focusChanged.explanation
-        } else if state == "recording" {
+        } else if state == "recording" || state == "dictionary-recording" {
             let id = session.begin()!; _ = session.recording(id); elapsed = 12; level = 0.45; audioFlowing = true
         }
         notify()

@@ -35,6 +35,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.showAudioSettings = { [weak self] in self?.showSettingsWindow(section: "Audio") }
             model.showModelSettings = { [weak self] in self?.showSettingsWindow(section: "Model") }
             model.showHistorySettings = { [weak self] in self?.showSettingsWindow(section: "History") }
+            model.showDictionarySettings = { [weak self] in self?.showSettingsWindow(section: "Dictionary") }
             model.showAboutSettings = { [weak self] in self?.showSettingsWindow(section: "About") }
             model.showHelp = { [weak self] in self?.showHelpWindow() }
             model.showSetup = { [weak self] in self?.showSetupWindow() }

@@ -10,7 +10,7 @@ enum DictionaryState: Equatable { case missing, loaded, unreadable, newerVersion
 struct DictionaryStore {
     let directory: URL
     enum Loaded: Equatable { case missing, loaded(PersonalDictionary), unreadable, newerVersion }
-    private var file: URL { directory.appendingPathComponent("personal-dictionary.json") }
+    var file: URL { directory.appendingPathComponent("personal-dictionary.json") }
 
     func load() -> Loaded {
         for staging in stagingFiles() { try? FileManager.default.removeItem(at: staging) }
@@ -70,6 +70,12 @@ struct DictionaryStore {
     }
 
     func setAsideFiles() -> [URL] { (try? files(Self.isSetAside)) ?? [] }
+    /// What Show in Finder selects. A folder Within can't search hides the saved file, so the folder is selected instead.
+    func shownInFinder(setAside: Bool) -> [URL] {
+        let exists = { (url: URL) in FileManager.default.fileExists(atPath: url.path) }
+        if setAside { return setAsideFiles().filter(exists) }
+        return exists(file) ? [file] : exists(directory) ? [directory] : []
+    }
     private func stagingFiles() -> [URL] { (try? files(Self.isStaging)) ?? [] }
     private static func isSetAside(_ name: String) -> Bool { name.hasPrefix("personal-dictionary.unreadable-") && name.hasSuffix(".json") }
     private static func isStaging(_ name: String) -> Bool { name.hasPrefix(".personal-dictionary-") && name.hasSuffix(".tmp") }
