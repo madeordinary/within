@@ -16,6 +16,9 @@ public struct CaptureLimits: Equatable, Sendable {
     /// One note recording. A faster-than-real-time 180-minute fixture soak (Sep 27, M5 Pro)
     /// stayed near 90–95 MB after model load; longer thoughts continue with another Record.
     public static let note = CaptureLimits(totalSeconds: 3 * 3600, backlogSeconds: 20)
+    /// One meeting stretch per source ring. A stretch that reaches its bound rolls over into a new
+    /// stretch; two streams share one inference lane, so raise the backlog only on soak evidence.
+    public static let meeting = CaptureLimits(totalSeconds: 3 * 3600, backlogSeconds: 20)
 
     public func ringCapacity(sampleRate: Double) -> Int { Int(sampleRate * backlogSeconds) }
     public func sampleLimit(sampleRate: Double) -> UInt64 { UInt64(sampleRate * totalSeconds) }

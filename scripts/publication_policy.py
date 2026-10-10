@@ -59,7 +59,11 @@ Sources/WithinCore/CaptureLimits.swift
 Sources/WithinCore/ClipboardLease.swift
 Sources/WithinCore/Diagnostics.swift
 Sources/WithinCore/DictationHistory.swift
+Sources/WithinCore/DocumentRetention.swift
 Sources/WithinCore/InsertionTrial.swift
+Sources/WithinCore/MeetingExport.swift
+Sources/WithinCore/MeetingHealth.swift
+Sources/WithinCore/MeetingLifecycle.swift
 Sources/WithinCore/Meetings.swift
 Sources/WithinCore/ModelManifest.swift
 Sources/WithinCore/NetworkBoundary.swift
@@ -76,6 +80,9 @@ Tests/WithinCoreTests/ClipboardLeaseTests.swift
 Tests/WithinCoreTests/DictationHistoryTests.swift
 Tests/WithinCoreTests/InsertionTrialTests.swift
 Tests/WithinCoreTests/IntegrityTests.swift
+Tests/WithinCoreTests/MeetingExportTests.swift
+Tests/WithinCoreTests/MeetingHealthTests.swift
+Tests/WithinCoreTests/MeetingLifecycleTests.swift
 Tests/WithinCoreTests/MeetingsTests.swift
 Tests/WithinCoreTests/NetworkBoundaryTests.swift
 Tests/WithinCoreTests/NotesTests.swift

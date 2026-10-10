@@ -85,6 +85,6 @@ final class UpdateCheckTests: XCTestCase {
         let decoder = JSONDecoder()
         XCTAssertNoThrow(try decoder.decode([HistoryEntry].self, from: Data(#"[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","date":810000000,"text":"Hello"}]"#.utf8)))
         XCTAssertNoThrow(try decoder.decode(Note.self, from: Data(#"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"T","created":810000000,"modified":810000100,"body":"B"}"#.utf8)))
-        XCTAssertNoThrow(try decoder.decode(Meeting.self, from: Data(#"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FF","title":"","created":810000000,"modified":810000000,"appName":"Zoom","segments":[{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FE","source":"you","offset":1,"text":"Hi"}],"notes":""}"#.utf8)))
+        // No build before meetings had stretches ever wrote a meeting file; MeetingsTests pins that the earlier shape is not read.
     }
 }

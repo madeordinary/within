@@ -217,4 +217,10 @@ final class WorkflowTests: XCTestCase {
         XCTAssertEqual(CaptureLimits.dictation.ringCapacity(sampleRate: 48_000), 960_000)
         XCTAssertEqual(CaptureLimits.dictation.sampleLimit(sampleRate: 48_000), 14_400_000)
     }
+
+    func testMeetingStretchLimitsAreThreeHoursWithTheProvenBacklog() {
+        XCTAssertEqual(CaptureLimits.meeting, CaptureLimits(totalSeconds: 3 * 3600, backlogSeconds: 20))
+        XCTAssertEqual(CaptureLimits.meeting.ringCapacity(sampleRate: 48_000), 960_000)
+        XCTAssertEqual(CaptureLimits.meeting.sampleLimit(sampleRate: 48_000), 518_400_000)
+    }
 }
