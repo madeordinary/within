@@ -12,6 +12,25 @@ final class SystemBoundaryTests: XCTestCase {
         XCTAssertTrue(state.isCurrent(id))
         XCTAssertNil(state.begin())
     }
+    func testLockKeepsBothVersionsOfPendingWords() {
+        var state = SessionState()
+        let id = state.begin()!
+        let change = DictionaryChange(transcribed: "gira", written: "Jira", outputUTF8Range: 0..<4)
+        _ = state.recording(id); _ = state.stopped(id)
+        _ = state.recover(DictionaryResult(original: "gira words", text: "Jira words", changes: [change]), id: id)
+        XCTAssertTrue(state.switchPendingWords())
+        XCTAssertFalse(state.interruptForSystemBoundary())
+        XCTAssertEqual(state.phase, .recovery)
+        XCTAssertTrue(state.isCurrent(id))
+        XCTAssertEqual(state.transcript, "gira words")
+        XCTAssertEqual(state.alternateTranscript, "Jira words")
+        XCTAssertTrue(state.showingOriginal)
+        XCTAssertEqual(state.dictionaryChanges, [change])
+        XCTAssertNil(state.begin())
+        XCTAssertTrue(state.switchPendingWords())
+        XCTAssertEqual(state.transcript, "Jira words")
+        XCTAssertEqual(state.originalTranscription, "gira words")
+    }
     func testLockInvalidatesActiveWorkAtEveryStage() {
         for stage in 0..<3 {
             var state = SessionState(); let id = state.begin()!
