@@ -960,7 +960,7 @@ final class AppModel: ObservableObject {
     private func loadNotes() {
         guard let notesStore else { return }
         let loaded = notesStore.loadAll()
-        notes = loaded.notes
+        notes = loaded.documents
         if loaded.unreadable > 0 { notesMessage = "\(loaded.unreadable) saved note(s) couldn’t be read and were left untouched." }
     }
     private func persistNote(_ note: Note) {

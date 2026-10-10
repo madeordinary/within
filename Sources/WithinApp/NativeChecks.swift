@@ -233,7 +233,7 @@ func nativeChecks(to output: URL) throws {
     try notesStore.delete(fixtureNote.id)
     let notesFolderEmpty = try FileManager.default.contentsOfDirectory(atPath: notesFolder.path).isEmpty
     let notesStorePassed = noteMode == 0o600 && notesFolderMode == 0o700 && notesInBackups
-        && reloadedNotes.notes == [fixtureNote] && reloadedNotes.unreadable == 0 && notesFolderEmpty
+        && reloadedNotes.documents == [fixtureNote] && reloadedNotes.unreadable == 0 && notesFolderEmpty
     // One capture at a time: while a note records, dictation refuses and cancel keeps the note.
     let noteSession = fixture("note-recording")
     noteSession.start(practice: false)
@@ -343,6 +343,47 @@ func nativeChecks(to output: URL) throws {
         && blocked.dictionaryState == .unreadable && blocked.dictionaryMessage.contains("couldn’t be deleted")
         && blockedShowsFolder && DictionaryStore(directory: protectedFolder).shownInFinder(setAside: false) == [protectedFile]
     dictionaryProtectedPassed = unreachableKept && dictionaryProtectedPassed
+    // Meeting storage in a temporary folder: the first save, the only call, leaves the folder out of backups
+    // however the store was built; owner-only, atomic, crash leftovers swept, a folder that can't be listed
+    // reported, and a deleted meeting never brought back by a late checkpoint.
+    let meetingsBase = FileManager.default.temporaryDirectory.appendingPathComponent("Within.MeetingsFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: meetingsBase) }
+    func outOfBackups(_ folder: URL) -> Bool { (try? folder.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) == true }
+    let meetingStore = MeetingStore(meetingsIn: meetingsBase)
+    let meetingsFolder = meetingStore.directory
+    var fixtureMeeting = Meeting(title: "Synthetic", created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
+        segments: [MeetingSegment(source: .others, offset: 2, text: "synthetic meeting words"),
+                   MeetingSegment(source: .you, offset: 5, text: "Synthetic reply", original: "synthetic wurd reply")],
+        notes: "synthetic notes", stretches: [MeetingStretch(start: 0, sources: [.you, .others])])
+    let meetingsFolderAbsent = !FileManager.default.fileExists(atPath: meetingsFolder.path)
+    var checkpoints = MeetingCheckpointGate()
+    if checkpoints.admit(fixtureMeeting.id, revision: 1) { try meetingStore.save(fixtureMeeting) }
+    let meetingFile = meetingsFolder.appendingPathComponent("\(fixtureMeeting.id.uuidString).json")
+    let spelledOut = MeetingStore(directory: meetingsBase.appendingPathComponent("Spelled", isDirectory: true).appendingPathComponent("Meetings.noindex", isDirectory: true))
+    try spelledOut.save(fixtureMeeting)
+    let meetingsExcludedFirst = meetingsFolderAbsent && outOfBackups(meetingsFolder) && meetingsFolder.lastPathComponent == "Meetings.noindex"
+        && outOfBackups(spelledOut.directory) && names(spelledOut.directory) == [meetingFile.lastPathComponent] && Meeting.excludedFromBackup
+    let meetingOwnerOnly = mode(meetingFile) == 0o600 && mode(meetingsFolder) == 0o700 && names(meetingsFolder) == [meetingFile.lastPathComponent]
+    let staleMeetingStaging = meetingsFolder.appendingPathComponent(".\(fixtureMeeting.id.uuidString)-\(UUID().uuidString).tmp")
+    FileManager.default.createFile(atPath: staleMeetingStaging.path, contents: Data("{".utf8))
+    let reloadedMeetings = meetingStore.loadAll()
+    let meetingReloaded = reloadedMeetings.documents == [fixtureMeeting] && reloadedMeetings.unreadable == 0 && !reloadedMeetings.unlistable
+        && names(meetingsFolder) == [meetingFile.lastPathComponent]
+    let unlistableFolder = meetingsBase.appendingPathComponent("Unlistable", isDirectory: true)
+    try FileManager.default.createDirectory(at: unlistableFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o000])
+    let unlistable = MeetingStore(directory: unlistableFolder).loadAll()
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: unlistableFolder.path)
+    let missing = MeetingStore(directory: meetingsBase.appendingPathComponent("Missing", isDirectory: true)).loadAll()
+    let unlistableReported = unlistable.unlistable && unlistable.documents.isEmpty && !missing.unlistable && missing.documents.isEmpty
+    let olderRefused = !checkpoints.admit(fixtureMeeting.id, revision: 1)
+    checkpoints.delete(fixtureMeeting.id)
+    try meetingStore.delete(fixtureMeeting.id)
+    fixtureMeeting.notes = "later synthetic notes"
+    if checkpoints.admit(fixtureMeeting.id, revision: 2) { try meetingStore.save(fixtureMeeting) }
+    let meetingNotResurrected = olderRefused && names(meetingsFolder).isEmpty
+    // Backup exclusion belongs to the kind of document: notes stay in backups.
+    let meetingsStorePassed = meetingsExcludedFirst && meetingOwnerOnly && meetingReloaded && unlistableReported && meetingNotResurrected
+        && !Note.excludedFromBackup && notesInBackups
     // Previews change the dictionary in memory only: no store, no file under the unused base, no preference written.
     let dictionaryPreview = fixture("ready")
     let unusedDictionary = output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Dictionary.noindex")
@@ -563,6 +604,7 @@ func nativeChecks(to output: URL) throws {
         "historyRetentionPreviewPassed": historyPolicyPassed,
         "notesStoreOwnerOnlyAtomicPassed": notesStorePassed,
         "notesOneCaptureAtATimePassed": notesGuardsPassed,
+        "meetingsStoreOwnerOnlyAtomicPassed": meetingsStorePassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -572,8 +614,8 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
-        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Open dictionary navigation from the Dictation space in the running app"]]
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }
