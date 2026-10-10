@@ -15,6 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var actionItem: NSMenuItem?
     private var cancelItem: NSMenuItem?
     private var reviewItem: NSMenuItem?
+    private var originalItem: NSMenuItem?
     private var localKeyMonitor: Any?
     private var lockDescriptor: Int32 = -1
 
@@ -98,6 +99,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         actionItem = item("Start Dictation", #selector(toggleDictation)); menu.addItem(actionItem!)
         cancelItem = item("Cancel Dictation", #selector(cancelDictation)); menu.addItem(cancelItem!)
         reviewItem = item("Review Pending Words…", #selector(reviewWords)); menu.addItem(reviewItem!)
+        originalItem = item("Show Original Transcription…", #selector(showOriginal)); menu.addItem(originalItem!)
         menu.addItem(.separator()); menu.addItem(item("Open Within…", #selector(openWithin)))
         menu.addItem(.separator()); menu.addItem(item("Quit Within", #selector(quit)))
         statusItem?.menu = menu
@@ -149,6 +151,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func toggleDictation() { if model.isActive { model.stop() } else { model.startFromCurrentWindow() } }
     @objc private func cancelDictation() { model.cancel() }
     @objc private func reviewWords() { showRecoveryWindow() }
+    /// Opens the Dictation row, where the clipboard is disclosed before Copy; it never copies by itself.
+    @objc private func showOriginal() { showMainWindow(); model.lastChangeFocusRequested = true }
     @objc private func openWithin() { showMainWindow() }
     @objc private func openSettings() { showSettingsWindow() }
     @objc private func openAbout() { showSettingsWindow(section: "About") }
@@ -289,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         actionItem?.isEnabled = model.isActive || model.canStart
         cancelItem?.isEnabled = active
         reviewItem?.isHidden = model.phase != .recovery
+        originalItem?.isHidden = model.lastDictationChange == nil
         // The pill belongs to dictation only; a note shows its recording in the Notes space and menu bar.
         if active && !model.isRecordingNote {
             if pill == nil {

@@ -125,6 +125,10 @@ struct MainView: View {
     @ObservedObject var model: AppModel
     var practiceExpanded = false
     var togglePractice: (Bool) -> Void = { _ in }
+    @FocusState private var changeFocus: LastDictationChangeRow.Control?
+    /// VoiceOver's cursor on the row; keyboard focus alone can't reach buttons while keyboard navigation is off.
+    @AccessibilityFocusState private var changeVoiceOverFocus: LastDictationChangeRow.Control?
+    @State private var statusFocusRequest = 0
     private var needsSetup: Bool { !model.modelInstalled || !model.microphoneAllowed }
     private var title: String {
         switch model.phase {
@@ -168,7 +172,11 @@ struct MainView: View {
                         Text(subtitle)
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
-                    SessionStatusView(model: model)
+                    SessionStatusView(model: model, focusRequest: statusFocusRequest)
+                    if model.lastDictationChange != nil || model.lastChangeExpiredWhileFocused {
+                        LastDictationChangeRow(model: model, focus: $changeFocus, voiceOverFocus: $changeVoiceOverFocus) { statusFocusRequest += 1 }
+                            .id("lastChange")
+                    }
                     if let release = model.availableUpdate {
                         HStack(spacing: 10) {
                             Image(systemName: "arrow.down.circle").foregroundStyle(Palette.accent).accessibilityHidden(true)
@@ -219,16 +227,87 @@ struct MainView: View {
             .onChange(of: practiceExpanded) { _, expanded in
                 if expanded { proxy.scrollTo("practice", anchor: .top) }
             }
-            .onAppear { if practiceExpanded { proxy.scrollTo("practice", anchor: .top) } }
+            .onAppear {
+                if practiceExpanded { proxy.scrollTo("practice", anchor: .top) }
+                if model.lastChangeFocusRequested { focusLastChange(proxy) }
+            }
+            .onChange(of: model.lastChangeFocusRequested) { _, requested in if requested { focusLastChange(proxy) } }
+            .onChange(of: changeFocus) { lastChangeFocusChanged() }
+            .onChange(of: changeVoiceOverFocus) { lastChangeFocusChanged() }
             }
             PrivacyFooter(text: model.privacySummary)
         }.frame(minWidth: 460, minHeight: 460).foregroundStyle(Palette.text).tint(Palette.accent)
             .onAppear { model.refreshPermissions(); model.pruneHistory() }
     }
+    /// From the menu bar: shows the row with Copy original transcription focused. Nothing is copied.
+    private func focusLastChange(_ proxy: ScrollViewProxy) {
+        model.lastChangeFocusRequested = false
+        guard model.lastDictationChange != nil else { return }
+        proxy.scrollTo("lastChange", anchor: .top); changeFocus = .copy; changeVoiceOverFocus = .copy
+    }
+    /// Keyboard or VoiceOver focus on the row defers the 5-minute removal until both have left.
+    private func lastChangeFocusChanged() {
+        if changeFocus == nil && changeVoiceOverFocus == nil { model.lastChangeRowLostFocus() } else { model.lastChangeRowHasFocus = true }
+    }
+}
+
+/// The original transcription after your spellings left Within. Kept in memory only, for up to five minutes.
+struct LastDictationChangeRow: View {
+    enum Control { case copy, hide }
+    @ObservedObject var model: AppModel
+    var focus: FocusState<Control?>.Binding
+    var voiceOverFocus: AccessibilityFocusState<Control?>.Binding
+    /// Called when the row removes itself, so focus can move to the status line.
+    var removed: () -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if let change = model.lastDictationChange {
+                Text("Your dictionary made \(AppModel.count(change.changes.count, "change")) in a dictation at \(change.time.formatted(date: .omitted, time: .shortened)).")
+                    .font(.system(size: 12, weight: .medium))
+                Group {
+                    DictionaryPairsText(changes: change.changes)
+                    Text("Kept in memory until a newer dictation changes words, for up to 5 minutes.")
+                }.font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+            } else {
+                // The limit passed while a button here had focus: the words are gone; the row goes when focus leaves.
+                Text("The original transcription is no longer kept.").font(.system(size: 12, weight: .medium))
+            }
+            if model.lastChangeCopyFailed {
+                Text("Copy failed. The original transcription is still here.").font(.system(size: 11)).foregroundStyle(Palette.warning)
+            }
+            HStack(spacing: 10) {
+                Button("Copy original transcription") {
+                    model.copyLastOriginal()
+                    if model.lastDictationChange == nil { removed() }
+                }.quietAction().focused(focus, equals: .copy).accessibilityFocused(voiceOverFocus, equals: .copy)
+                Button("Hide") { model.dismissLastDictationChange(); removed() }.quietAction()
+                    .accessibilityLabel("Hide dictionary changes").focused(focus, equals: .hide).accessibilityFocused(voiceOverFocus, equals: .hide)
+            }
+            Text("Copy uses your clipboard. Other apps, clipboard managers, and Universal Clipboard may read or sync these words.")
+                .font(.system(size: 11)).foregroundStyle(Palette.secondary)
+        }.withinSurface(padding: 12)
+            .onDisappear { model.lastChangeRowLostFocus() }
+    }
+}
+
+/// Dictionary changes as "gira → Jira" on screen and "gira changed to Jira" for VoiceOver: up to three, then "and 2 more".
+struct DictionaryPairsText: View {
+    var prefix = ""
+    let changes: [DictionaryChange]
+    private func pairs(_ joiner: String) -> String {
+        var seen = Set<[String]>()
+        let pairs = changes.filter { seen.insert([$0.transcribed, $0.written]).inserted }.map { $0.transcribed + joiner + $0.written }
+        let shown = pairs.prefix(3).joined(separator: ", ")
+        return prefix + (pairs.count > 3 ? "\(shown), and \(pairs.count - 3) more." : shown + ".")
+    }
+    var body: some View { Text(pairs(" → ")).accessibilityLabel(pairs(" changed to ")) }
 }
 
 struct SessionStatusView: View {
     @ObservedObject var model: AppModel
+    /// Changing it moves VoiceOver to the status message after a control removed itself.
+    var focusRequest = 0
+    @AccessibilityFocusState private var messageFocused: Bool
     var body: some View {
         HStack(spacing: 10) {
             HStack(spacing: 8) {
@@ -238,13 +317,14 @@ struct SessionStatusView: View {
                 Text(model.phase == .recording ? (model.audioFlowing ? "Microphone on · \(Int(model.elapsed))s" : "Starting microphone…") : "Microphone off")
                     .font(.system(size: 12, weight: .semibold))
                 Text(model.message).font(.system(size: 12)).foregroundStyle(Palette.secondary).lineLimit(2)
+                    .accessibilityFocused($messageFocused)
             }.padding(.horizontal, 12).padding(.vertical, 7)
                 .background(Palette.tint.opacity(0.5), in: Capsule())
             Spacer(minLength: 6)
             if model.phase == .recovery { Button("Review words") { model.showRecovery?() }.primaryAction() }
             else if model.isActive { Button("Stop", action: model.stop).primaryAction(); Button("Cancel", action: model.cancel).quietAction() }
             else if model.workerBusy { ProgressView().controlSize(.small).accessibilityLabel("Finishing current work") }
-        }
+        }.onChange(of: focusRequest) { messageFocused = true }
     }
 }
 
@@ -391,6 +471,7 @@ struct PracticeView: View {
     @ObservedObject var model: AppModel
     var embedded = false
     var done: () -> Void = {}
+    @FocusState private var editorFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             if !embedded { Text("Try your first words.").font(Typography.display(28)) }
@@ -410,10 +491,24 @@ struct PracticeView: View {
                         .allowsHitTesting(false).accessibilityHidden(true)
                 }
                 TextEditor(text: $model.practiceText).font(.system(size: 16)).scrollContentBackground(.hidden)
-                    .padding(12)
+                    .padding(12).focused($editorFocused)
                     .accessibilityLabel("Practice text")
                     .accessibilityHint(model.practiceText.isEmpty ? "Try saying: A little more room to think. Your words appear here after you finish. Kept until you clear them or quit." : "Kept until you clear these words or quit.")
             }.frame(minHeight: 140).background(embedded ? Palette.canvas : Palette.surface, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            if let change = model.practiceChange {
+                VStack(alignment: .leading, spacing: 8) {
+                    DictionaryPairsText(prefix: "Your dictionary changed: ", changes: change.changes)
+                        .font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                    if change.restorable {
+                        Button("Use original transcription") { model.useOriginalPracticeText(); editorFocused = true }.quietAction()
+                    } else {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Original transcription").font(.system(size: 11, weight: .medium)).foregroundStyle(Palette.secondary)
+                            Text(change.original).font(.system(size: 12)).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+                        }.accessibilityElement(children: .combine)
+                    }
+                }
+            }
             HStack {
                 if model.isActive && model.isPracticeSession {
                     Button("Stop and transcribe", action: model.stop).primaryAction()
@@ -422,7 +517,8 @@ struct PracticeView: View {
                     Button("Start practice") { model.start(practice: true) }.primaryAction().disabled(!model.canStart)
                 }
                 Spacer()
-                Button("Clear") { model.practiceText = "" }.quietAction().disabled(model.practiceText.isEmpty || model.workerBusy)
+                Button("Clear", action: model.clearPractice).quietAction()
+                    .disabled((model.practiceText.isEmpty && model.practiceChange == nil) || model.workerBusy)
                 if !embedded { Button("Done", action: done).disabled(model.hasActivePracticeSession) }
             }
             Text("Practice stays here until you clear it or quit. It’s never added to history.").font(.system(size: 11)).foregroundStyle(Palette.secondary)
@@ -443,13 +539,29 @@ struct RecoveryView: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(18)
             }.frame(minHeight: 120, maxHeight: 260).background(Palette.canvas.opacity(0.75), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .accessibilityLabel("Pending dictation")
+                .accessibilityValue(model.session.alternateTranscript == nil ? "" : model.session.showingOriginal ? "Original transcription" : "Your spellings")
+            if !model.session.dictionaryChanges.isEmpty {
+                HStack(spacing: 10) {
+                    Image(systemName: "character.book.closed").foregroundStyle(Palette.secondary).accessibilityHidden(true)
+                    Group {
+                        if model.session.showingOriginal { Text("Showing the original transcription.") }
+                        else {
+                            DictionaryPairsText(prefix: "Your dictionary made \(AppModel.count(model.session.dictionaryChanges.count, "change")): ",
+                                changes: model.session.dictionaryChanges)
+                        }
+                    }.font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 8)
+                    Button(model.session.showingOriginal ? "Use your spellings" : "Use original transcription", action: model.switchPendingWords)
+                        .quietAction().disabled(model.workerBusy || model.returning)
+                }
+            }
             Text("Leaving this page or closing Within’s window keeps these words available. A new dictation won’t replace them.")
                 .font(.system(size: 12)).foregroundStyle(Palette.secondary)
             HStack {
                 Button("Return to \(model.targetName) and Insert", action: model.returnToOriginal).quietAction()
                     .disabled(!model.canReturn || model.workerBusy)
                 Spacer()
-                Button("Copy", action: model.copyPending).primaryAction().focused($copyFocused)
+                Button("Copy") { model.copyPending() }.primaryAction().focused($copyFocused)
                     .keyboardShortcut("c", modifiers: [.command, .shift]).disabled(model.workerBusy || model.returning)
                 Button("Discard…", role: .destructive) { confirmingDiscard = true }.quietAction().disabled(model.workerBusy || model.returning)
             }

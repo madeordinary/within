@@ -1,6 +1,11 @@
 import AppKit
 import WithinCore
 
+/// A named fixture pasteboard that refuses every write, for the copy-failure paths.
+private final class RefusingPasteboard: NSPasteboard {
+    override func setString(_ string: String, forType dataType: NSPasteboard.PasteboardType) -> Bool { false }
+}
+
 /// Uses a uniquely named, synthetic pasteboard. Never reads the user's clipboard.
 @MainActor
 func nativeChecks(to output: URL) throws {
@@ -364,6 +369,126 @@ func nativeChecks(to output: URL) throws {
     let dictionaryPreviewPassed = offStaysEmpty && typedSaved && normalizedSaved && rawRefused && updated && entryOff && entryDeleted
         && switchedOff && previewCleared && previewReset && dictionaryPreview.dictionaryStore == nil
         && !FileManager.default.fileExists(atPath: unusedDictionary.path)
+    // The dictionary at the speech-result boundary: synthetic entries, preview models and named pasteboards only.
+    let transcribed = "I moved the ticket to gira and asked shivon to review it."
+    let spellings = "I moved the ticket to Jira and asked Siobhan to review it."
+    let recoveryLiteral = "The best ideas often start as a few ordinary words. Let’s make a little room for them."
+    let dictionaryBoard = NSPasteboard(name: .init("Within.DictionaryFixture.\(UUID().uuidString)"))
+    defer { dictionaryBoard.releaseGlobally() }
+    let refusingBoard = NSPasteboard(name: .init("Within.DictionaryFixture.\(UUID().uuidString)"))
+    defer { refusingBoard.releaseGlobally() }
+    object_setClass(refusingBoard, RefusingPasteboard.self)
+    // Recovery keeps both versions across pages; the switch swaps them and Discard clears both.
+    let switching = fixture("recovery-dictionary")
+    var recoverySwitchPassed = switching.pendingText == spellings && switching.session.originalTranscription == transcribed
+        && switching.session.dictionaryChanges.map(\.written) == ["Jira", "Siobhan"] && !switching.session.showingOriginal
+    switching.switchPendingWords()
+    recoverySwitchPassed = switching.pendingText == transcribed && switching.session.showingOriginal
+        && switching.session.originalTranscription == nil && recoverySwitchPassed
+    let switchNavigation = AppNavigation()
+    for page: AppPage in [.recovery, .home, .settings, .help, .recovery] {
+        recoverySwitchPassed = switchNavigation.navigate(to: page, model: switching, blocked: false, confirmPracticeExit: { false })
+            && switching.pendingText == transcribed && switching.session.alternateTranscript == spellings && recoverySwitchPassed
+    }
+    switching.switchPendingWords()
+    recoverySwitchPassed = switching.pendingText == spellings && switching.session.originalTranscription == transcribed && recoverySwitchPassed
+    let unchangedRecovery = fixture("recovery")
+    unchangedRecovery.switchPendingWords()
+    switching.discard()
+    let dictionaryRecoverySwitchPassed = recoverySwitchPassed && unchangedRecovery.pendingText == recoveryLiteral && !unchangedRecovery.session.showingOriginal
+        && switching.pendingText.isEmpty && switching.session.alternateTranscript == nil && switching.session.dictionaryChanges.isEmpty
+        && switching.lastDictationChange == nil && switching.phase == .ready
+    // Copy from recovery keeps the original transcription in memory; Copy original transcription clears it only when the write succeeds.
+    let copying = fixture("recovery-dictionary")
+    let copiedSession = copying.session.id
+    copying.copyPending(pasteboard: dictionaryBoard)
+    let held = copying.lastDictationChange
+    var copyOriginalPassed = dictionaryBoard.string(forType: .string) == spellings && copying.phase == .ready
+        && held?.original == transcribed && held?.sessionID == copiedSession && held?.changes.count == 2
+    copying.copyLastOriginal(pasteboard: refusingBoard)
+    copyOriginalPassed = copying.lastDictationChange == held && copying.lastChangeCopyFailed && copyOriginalPassed
+    copying.copyLastOriginal(pasteboard: dictionaryBoard)
+    copyOriginalPassed = dictionaryBoard.string(forType: .string) == transcribed && copying.lastDictationChange == nil
+        && !copying.lastChangeCopyFailed && copying.message.hasPrefix("Copied the original transcription") && copyOriginalPassed
+    // An earlier dictation's timer never clears a later one. Expiring while the row has focus drops the words and keeps the row until focus leaves.
+    let earlier = LastDictationChange(sessionID: UUID(), original: transcribed, changes: held?.changes ?? [], time: Date())
+    let later = LastDictationChange(sessionID: UUID(), original: "synthetic later words", changes: held?.changes ?? [], time: Date())
+    let timed = fixture("ready")
+    timed.previewLastDictationChange(earlier); timed.previewLastDictationChange(later)
+    timed.expireLastDictationChange(sessionID: earlier.sessionID)
+    let earlierTimerIgnored = timed.lastDictationChange == later
+    timed.expireLastDictationChange(sessionID: later.sessionID)
+    let ownTimerCleared = timed.lastDictationChange == nil && !timed.lastChangeExpiredWhileFocused
+    timed.previewLastDictationChange(later); timed.lastChangeRowHasFocus = true
+    timed.expireLastDictationChange(sessionID: later.sessionID)
+    let focusedExpiry = timed.lastDictationChange == nil && timed.lastChangeExpiredWhileFocused
+    timed.lastChangeRowLostFocus()
+    copyOriginalPassed = earlierTimerIgnored && ownTimerCleared && focusedExpiry && !timed.lastChangeExpiredWhileFocused && copyOriginalPassed
+    // Only a later dictation that changed words replaces it: not one without changes, and not one where the original transcription was used.
+    let noChange = fixture("recovery")
+    noChange.previewLastDictationChange(earlier); noChange.copyPending(pasteboard: dictionaryBoard)
+    let replacing = fixture("recovery-dictionary")
+    let replacingSession = replacing.session.id
+    replacing.previewLastDictationChange(earlier); replacing.copyPending(pasteboard: dictionaryBoard)
+    let originalUsed = fixture("recovery-dictionary")
+    originalUsed.previewLastDictationChange(earlier); originalUsed.switchPendingWords(); originalUsed.copyPending(pasteboard: dictionaryBoard)
+    copyOriginalPassed = noChange.lastDictationChange == earlier && replacing.lastDictationChange?.sessionID == replacingSession
+        && originalUsed.lastDictationChange == earlier && dictionaryBoard.string(forType: .string) == transcribed && copyOriginalPassed
+    // Hide, clearing or deleting history, history Off, and lock or sleep (dictation and note) clear it; another retention keeps it.
+    let clears: [(AppModel) -> Void] = [{ $0.dismissLastDictationChange() }, { $0.clearHistory() }, { $0.deleteHistoryEntry(UUID()) },
+                                         { $0.chooseHistoryRetention(.off) }, { $0.cancelForBoundary() }]
+    for clear in clears {
+        let model = fixture("inserted-dictionary")
+        let seeded = model.lastDictationChange != nil
+        clear(model)
+        copyOriginalPassed = seeded && model.lastDictationChange == nil && copyOriginalPassed
+    }
+    let keptByWeek = fixture("inserted-dictionary")
+    keptByWeek.chooseHistoryRetention(.week)
+    let noteBoundary = fixture("note-recording")
+    noteBoundary.soundsEnabled = false
+    noteBoundary.previewLastDictationChange(earlier); noteBoundary.cancelForBoundary()
+    let dictionaryCopyOriginalPassed = keptByWeek.lastDictationChange != nil && noteBoundary.lastDictationChange == nil && copyOriginalPassed
+    // Practice: Use original transcription restores exactly the appended words until any edit, even one that retypes the same text.
+    let practicePrefix = "A little more room for an ordinary idea.\n"
+    let restoring = fixture("practice-dictionary")
+    var practiceRestorePassed = restoring.practiceText == practicePrefix + spellings && restoring.practiceChange?.restorable == true
+    restoring.useOriginalPracticeText()
+    practiceRestorePassed = restoring.practiceText == practicePrefix + transcribed && restoring.practiceChange == nil && practiceRestorePassed
+    let retyped = fixture("practice-dictionary")
+    let retypedText = retyped.practiceText
+    retyped.practiceText.removeLast(); retyped.practiceText += "."
+    retyped.useOriginalPracticeText()
+    practiceRestorePassed = retyped.practiceText == retypedText && retyped.practiceChange?.restorable == false
+        && retyped.practiceChange?.original == transcribed && practiceRestorePassed
+    retyped.clearPractice()
+    // Emptying the field by hand keeps the original transcription shown until Clear.
+    let emptied = fixture("practice-dictionary")
+    emptied.practiceText = ""
+    practiceRestorePassed = emptied.practiceChange?.restorable == false && emptied.practiceChange?.original == transcribed && practiceRestorePassed
+    emptied.clearPractice()
+    let dictionaryPracticeRestorePassed = practiceRestorePassed && retyped.practiceText.isEmpty && retyped.practiceChange == nil
+        && emptied.practiceChange == nil && fixture("practice").practiceChange == nil
+    // With the developer default off, an off dictionary, every word off, or no words, dictation text is exactly as transcribed.
+    let plainRecovery = fixture("recovery")
+    var emptyDictionaryPassed = plainRecovery.pendingText == recoveryLiteral && plainRecovery.session.alternateTranscript == nil
+        && plainRecovery.session.dictionaryChanges.isEmpty && !plainRecovery.showsPersonalDictionary && plainRecovery.dictionaryMatcher.isEmpty
+    plainRecovery.copyPending(pasteboard: dictionaryBoard)
+    emptyDictionaryPassed = dictionaryBoard.string(forType: .string) == recoveryLiteral && plainRecovery.lastDictationChange == nil && emptyDictionaryPassed
+    let defaultOff = fixture("ready")
+    _ = defaultOff.addDictionaryEntry(heardAs: ["gira"], writeAs: "Jira")
+    var dictionaryOff = AppModel.previewWords
+    dictionaryOff.enabled = false
+    var everyWordOff = AppModel.previewWords
+    for index in everyWordOff.entries.indices { everyWordOff.entries[index].enabled = false }
+    var matchers = [defaultOff.dictionaryMatcher]
+    for loaded in [DictionaryStore.Loaded.missing, .loaded(PersonalDictionary()), .loaded(dictionaryOff), .loaded(everyWordOff)] {
+        let model = fixture("ready")
+        model.previewDictionary(loaded)
+        matchers.append(model.dictionaryMatcher)
+    }
+    let emptyDictionaryLeavesDictationUnchangedPassed = emptyDictionaryPassed && defaultOff.dictionary.entries.count == 1
+        && matchers.allSatisfy { $0.isEmpty && $0.apply(to: transcribed) == DictionaryResult(unchanged: transcribed) }
     // Previews never reach the network or store update choices.
     let updatePreview = fixture("update-available")
     updatePreview.checkForUpdates()
@@ -424,9 +549,13 @@ func nativeChecks(to output: URL) throws {
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
+        "dictionaryRecoverySwitchPassed": dictionaryRecoverySwitchPassed,
+        "dictionaryCopyOriginalPassed": dictionaryCopyOriginalPassed,
+        "dictionaryPracticeRestorePassed": dictionaryPracticeRestorePassed,
+        "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder"]]
     try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

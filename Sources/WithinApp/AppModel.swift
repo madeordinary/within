@@ -35,7 +35,10 @@ final class AppModel: ObservableObject {
     private let readinessWaitMessage = "Local speech is busy. Try again when it’s ready."
     private var stopDiagnostics = RecordingStopTracker()
     private var startupDiagnostics = RecordingStartupTracker()
-    @Published var practiceText = ""
+    /// Any edit that didn't come from a dictation ends Use original transcription, even one that retypes the same words.
+    @Published var practiceText = "" { didSet { if practiceText != oldValue, !appendingPractice { practiceChange?.restorable = false } } }
+    @Published private(set) var practiceChange: PracticeChange?
+    private var appendingPractice = false
     @Published private(set) var isPracticeSession = false
     @Published var compatibilityPaste: Bool { didSet { guard !previewMode else { return }; UserDefaults.standard.set(compatibilityPaste, forKey: "compatibilityPaste") } }
     @Published var mode: ActivationMode { didSet { guard !previewMode else { return }; UserDefaults.standard.set(mode.rawValue, forKey: "activationMode") } }
@@ -69,6 +72,15 @@ final class AppModel: ObservableObject {
     @Published private(set) var dictionaryHasSetAside = false
     @Published private(set) var dictionaryMessage = ""
     private(set) var dictionaryMatcher = DictionaryMatcher.empty
+    /// In memory only: the original transcription after your spellings left Within.
+    @Published private(set) var lastDictationChange: LastDictationChange?
+    @Published private(set) var lastChangeCopyFailed = false
+    /// The 5-minute limit passed while the row had keyboard or VoiceOver focus: the words are gone, the row stays until focus leaves.
+    @Published private(set) var lastChangeExpiredWhileFocused = false
+    /// Set by the menu bar item; the Dictation row takes focus and resets it.
+    @Published var lastChangeFocusRequested = false
+    var lastChangeRowHasFocus = false
+    private var lastChangeExpiry: Task<Void, Never>?
     /// Update checks: `nil` means not chosen, which behaves as off. Nothing installs itself.
     @Published private(set) var automaticUpdateChecks: Bool?
     @Published private(set) var updateResult: UpdateCheckResult?
@@ -391,6 +403,8 @@ final class AppModel: ObservableObject {
         notify()
         resumeEscapeShortcut()
         startupDiagnostics.mark(.feedbackPresented)
+        // Dictionary edits during this recording apply to the next one.
+        let matcher = dictionaryMatcher
         worker = Task { [weak self] in
             guard let self else { return }
             do {
@@ -423,6 +437,7 @@ final class AppModel: ObservableObject {
                 }
                 if ring.status == 2 { forcedRecovery = "Recording stopped because speech processing fell behind. These are the words captured before the stop." }
                 if phase == .recording { _ = session.stopped(id) }
+                let result = matcher.apply(to: text)
                 if text.isEmpty {
                     session.finish(id)
                     message = forcedRecovery == nil ? "No speech detected. Try again when you’re ready." : "Recording stopped before any words were captured. Check the microphone and try again."
@@ -430,9 +445,10 @@ final class AppModel: ObservableObject {
                 }
                 else if practice {
                     completeSetup()
-                    practiceText += (practiceText.isEmpty ? "" : "\n") + text
-                    session.finish(id); message = "Your words arrived. Try the shortcut in another app."; releaseTarget(); announce("Practice dictation finished")
-                } else { await deliver(text, id: id) }
+                    appendPractice(result)
+                    session.finish(id); message = "Your words arrived. Try the shortcut in another app."; releaseTarget()
+                    announce(result.changed ? "Practice dictation finished. Your dictionary made \(Self.count(result.changes.count, "change"))." : "Practice dictation finished")
+                } else { await deliver(result, id: id) }
             } catch {
                 capture.stop(reusingStoppedEngine: false); pulse?.cancel(); pulse = nil; shortcut.stopEscapeMonitor()
                 restoreOutputIfNeeded()
@@ -442,7 +458,7 @@ final class AppModel: ObservableObject {
                 if error is IntegrityError { invalidateModelVerification() }
                 if session.isCurrent(id), case SpeechFailure.partial(let text) = error {
                     forcedRecovery = "Transcription stopped early. These are the words recovered before the error; part of your dictation may be missing."
-                    await deliver(text, id: id)
+                    await deliver(matcher.apply(to: text), id: id)
                 } else if session.isCurrent(id) {
                     session.finish(id); releaseTarget()
                     lastErrorCode = error is IntegrityError ? "model_integrity" : "capture_or_inference"
@@ -537,7 +553,8 @@ final class AppModel: ObservableObject {
             eventListeningAllowed: CGPreflightListenEventAccess(),
             audioConfiguration: capture.lastConfigurationChange))
     }
-    private func deliver(_ text: String, id: UUID) async {
+    private func deliver(_ result: DictionaryResult, id: UUID) async {
+        let text = result.text
         guard session.isCurrent(id), trial.begin(text: text) else { return }
         if forcedRecovery != nil { trial.recover(.targetUnavailable) }
         else if let initialBlock { trial.recover(initialBlock) }
@@ -551,11 +568,14 @@ final class AppModel: ObservableObject {
             trial.completeWrite(confirmed: target.replaceSelection(with: text))
         } else if target == nil { trial.recover(.targetUnavailable) }
         if trial.phase == .inserted {
-            session.finish(id); releaseTarget(); message = "Inserted. Microphone off."; announce("Dictation inserted")
-            recordHistory(text, practice: isPracticeSession)
+            session.finish(id); releaseTarget()
+            message = Self.insertedMessage(changes: result.changes.count)
+            announce(result.changed ? "Dictation inserted. Your dictionary made \(Self.count(result.changes.count, "change"))." : "Dictation inserted")
+            recordHistory(text, original: nil, practice: isPracticeSession)
+            if result.changed { keepLastDictationChange(original: result.original, changes: result.changes, sessionID: id) }
         } else {
             suspendEscapeShortcut()
-            _ = session.recover(text, id: id)
+            _ = session.recover(result, id: id)
             if case .recovery(let reason) = trial.phase { recoveryReason = reason }
             else { recoveryReason = .uncertainWrite }
             lastErrorCode = recoveryReason?.rawValue ?? "insertion_unconfirmed"
@@ -578,9 +598,10 @@ final class AppModel: ObservableObject {
             } else { trial.recover(.targetUnavailable) }
             returning = false
             if trial.phase == .inserted {
-                let words = pendingText
+                let words = pendingText, original = session.originalTranscription, changes = session.dictionaryChanges
                 discard(); message = "Inserted into the original field."; announce(message)
-                recordHistory(words, practice: isPracticeSession)
+                recordHistory(words, original: nil, practice: isPracticeSession)
+                if let original { keepLastDictationChange(original: original, changes: changes, sessionID: id) }
             }
             else {
                 if case .recovery(let reason) = trial.phase { recoveryReason = reason; recoveryDetail = reason.explanation }
@@ -588,16 +609,21 @@ final class AppModel: ObservableObject {
             }
         }
     }
-    func copyPending() {
-        guard phase == .recovery, !workerBusy, !returning, !pendingText.isEmpty else { return }
-        let pasteboard = NSPasteboard.general
+    func copyPending(pasteboard: NSPasteboard = .general) {
+        guard phase == .recovery, !workerBusy, !returning, !pendingText.isEmpty, let id = session.id else { return }
         pasteboard.clearContents()
-        let words = pendingText
+        let words = pendingText, original = session.originalTranscription, changes = session.dictionaryChanges
         if pasteboard.setString(words, forType: .string) {
             discard(); message = "Copied. Your clipboard may sync through macOS."; announce("Copied to clipboard")
-            recordHistory(words, practice: isPracticeSession)
+            recordHistory(words, original: nil, practice: isPracticeSession)
+            if let original { keepLastDictationChange(original: original, changes: changes, sessionID: id) }
         }
         else { recoveryDetail = "Copy failed. Your words are still here." }
+    }
+    /// Shows the other version of the pending words; Return and Copy use whichever is showing.
+    func switchPendingWords() {
+        guard phase == .recovery, !workerBusy, !returning, session.switchPendingWords() else { return }
+        announce(session.showingOriginal ? "Showing original transcription" : "Showing your spellings")
     }
     func discard() {
         guard !workerBusy else { return }
@@ -605,6 +631,78 @@ final class AppModel: ObservableObject {
         dismissRecovery?(); message = "Ready when you are."; notify()
     }
     private func releaseTarget() { target?.stopObserving(); target = nil }
+
+    // MARK: Original transcription
+
+    /// Your spellings left Within: keeps the original transcription in memory for Copy original transcription.
+    /// Only a later dictation the dictionary changed replaces it.
+    private func keepLastDictationChange(original: String, changes: [DictionaryChange], sessionID: UUID) {
+        setLastDictationChange(LastDictationChange(sessionID: sessionID, original: original, changes: changes, time: Date()))
+        lastChangeExpiry = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(300))
+            guard !Task.isCancelled else { return }
+            self?.expireLastDictationChange(sessionID: sessionID)
+        }
+    }
+    private func setLastDictationChange(_ change: LastDictationChange?) {
+        lastChangeExpiry?.cancel(); lastChangeExpiry = nil
+        lastDictationChange = change; lastChangeCopyFailed = false; lastChangeExpiredWhileFocused = false
+        notify()
+    }
+    private func clearLastDictationChange() {
+        if lastDictationChange != nil || lastChangeExpiredWhileFocused { setLastDictationChange(nil) }
+    }
+    /// The 5-minute limit. An earlier dictation's timer never clears a later one.
+    func expireLastDictationChange(sessionID: UUID) {
+        guard lastDictationChange?.sessionID == sessionID else { return }
+        let focused = lastChangeRowHasFocus
+        setLastDictationChange(nil)
+        lastChangeExpiredWhileFocused = focused
+    }
+    func lastChangeRowLostFocus() {
+        lastChangeRowHasFocus = false
+        if lastChangeExpiredWhileFocused { lastChangeExpiredWhileFocused = false }
+    }
+    func dismissLastDictationChange() { clearLastDictationChange() }
+    func copyLastOriginal(pasteboard: NSPasteboard = .general) {
+        guard let change = lastDictationChange else {
+            guard lastChangeExpiredWhileFocused else { return }
+            clearLastDictationChange(); message = "The original transcription is no longer kept."; announce(message); return
+        }
+        pasteboard.clearContents()
+        guard pasteboard.setString(change.original, forType: .string) else {
+            lastChangeCopyFailed = true; announce("Copy failed. The original transcription is still here."); return
+        }
+        clearLastDictationChange()
+        message = "Copied the original transcription. Your clipboard may sync through macOS."; announce("Copied the original transcription")
+    }
+    /// Previews and native checks only: no timer starts.
+    func previewLastDictationChange(_ change: LastDictationChange?) {
+        guard previewMode else { return }
+        setLastDictationChange(change)
+    }
+    static func count(_ number: Int, _ noun: String) -> String { "\(number) \(noun)\(number == 1 ? "" : "s")" }
+    static func insertedMessage(changes: Int) -> String {
+        changes == 0 ? "Inserted. Microphone off." : "Inserted with \(count(changes, "dictionary change")). Microphone off."
+    }
+
+    // MARK: Practice
+
+    private func appendPractice(_ result: DictionaryResult) {
+        let separator = practiceText.isEmpty ? "" : "\n"
+        appendingPractice = true; practiceText += separator + result.text; appendingPractice = false
+        practiceChange = result.changed ? PracticeChange(separator: separator, text: result.text, original: result.original, changes: result.changes) : nil
+    }
+    /// Only while the practice text is unedited since that result, so exactly the appended words are replaced.
+    func useOriginalPracticeText() {
+        guard let change = practiceChange, change.restorable else { return }
+        let appended = (change.separator + change.text).utf8
+        guard practiceText.utf8.suffix(appended.count).elementsEqual(appended) else { return }
+        practiceText = String(decoding: practiceText.utf8.dropLast(appended.count), as: UTF8.self) + change.separator + change.original
+        practiceChange = nil
+        announce("Practice text now uses the original transcription")
+    }
+    func clearPractice() { practiceText = ""; practiceChange = nil }
 
     // MARK: Personal dictionary
 
@@ -965,6 +1063,7 @@ final class AppModel: ObservableObject {
 
     func chooseHistoryRetention(_ retention: HistoryRetention) {
         historyRetention = retention
+        if retention == .off { clearLastDictationChange() }
         if !previewMode { UserDefaults.standard.set(retention.rawValue, forKey: "historyRetention") }
         pruneHistory()
     }
@@ -975,9 +1074,9 @@ final class AppModel: ObservableObject {
         history = pruned; persistHistory()
     }
     func deleteHistoryEntry(_ id: UUID) {
-        history.removeAll { $0.id == id }; persistHistory(); announce("Dictation deleted from history")
+        history.removeAll { $0.id == id }; persistHistory(); clearLastDictationChange(); announce("Dictation deleted from history")
     }
-    func clearHistory() { history = []; persistHistory(); announce("History cleared") }
+    func clearHistory() { history = []; persistHistory(); clearLastDictationChange(); announce("History cleared") }
     func copyHistoryEntry(_ entry: HistoryEntry) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -999,7 +1098,8 @@ final class AppModel: ObservableObject {
         catch { historyMessage = "History couldn’t be saved on this Mac. Your dictation wasn’t affected." }
     }
     /// Only confirmed insertions and explicit Copy reach history. Practice, cancel and discard never do.
-    private func recordHistory(_ text: String, practice: Bool) {
+    /// `original` is not saved yet: history keeps the original transcription only if the owner approves it (question 1).
+    private func recordHistory(_ text: String, original: String?, practice: Bool) {
         guard !practice, let retention = historyRetention, retention.keepsHistory else { return }
         history = HistoryPolicy.adding(text, at: Date(), to: history, retention: retention)
         persistHistory()
@@ -1038,7 +1138,8 @@ final class AppModel: ObservableObject {
         memoryPressure?.resume()
     }
     @objc private func screenLocked() { cancelForBoundary() }
-    private func cancelForBoundary() {
+    func cancelForBoundary() {
+        clearLastDictationChange()
         if isRecordingNote {
             // Pause and keep: the note keeps its words and a visible gap; Record resumes explicitly.
             pendingNoteGap = "Paused when the Mac locked or went to sleep"
@@ -1102,6 +1203,12 @@ final class AppModel: ObservableObject {
             appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development",
             lastRecordingStartup: startupDiagnostics.latest).preview()
     }
+    /// Synthetic entries for previews and native checks only.
+    static let previewWords = PersonalDictionary(entries: [
+        DictionaryEntry(heardAs: ["gira", "jeera"], writeAs: "Jira", created: Date(timeIntervalSince1970: 1_800_000_000)),
+        DictionaryEntry(heardAs: ["shivon", "chevonne"], writeAs: "Siobhan", created: Date(timeIntervalSince1970: 1_800_000_001)),
+        DictionaryEntry(heardAs: ["cube cuddle", "cube control"], writeAs: "kubectl", created: Date(timeIntervalSince1970: 1_800_000_002))
+    ])
     func configurePreview(_ state: String) {
         guard previewMode else { return }
         modelBusy = false; workerBusy = false
@@ -1109,6 +1216,8 @@ final class AppModel: ObservableObject {
         historyRetention = nil; history = []
         automaticUpdateChecks = nil; updateResult = nil
         showsPersonalDictionary = false; dictionaryHasSetAside = false; dictionaryMessage = ""; replaceDictionary(with: .missing)
+        lastChangeExpiry?.cancel(); lastDictationChange = nil; lastChangeCopyFailed = false; lastChangeExpiredWhileFocused = false; practiceChange = nil
+        if state.hasSuffix("-dictionary") { previewDictionary(.loaded(Self.previewWords)) }
         if state == "update-available" {
             automaticUpdateChecks = true
             updateResult = .available(ReleaseInfo(tag: "v0.1.0-build12", title: "Within 0.1.0 (build 12)",
@@ -1157,7 +1266,13 @@ final class AppModel: ObservableObject {
         if state == "model-error" { modelMessage = "Model unavailable. Remove it and download a fresh copy." }
         if state == "missing-input" { devices = [] }
         if state == "permission" { accessibilityAllowed = false }
-        if state == "practice" { practiceText = "A little more room for an ordinary idea."; isPracticeSession = true }
+        if state == "practice" || state == "practice-dictionary" { practiceText = "A little more room for an ordinary idea."; isPracticeSession = true }
+        if state == "practice-dictionary" { appendPractice(dictionaryMatcher.apply(to: "I moved the ticket to gira and asked shivon to review it.")) }
+        if state == "inserted-dictionary" {
+            let result = dictionaryMatcher.apply(to: "Ask shivon to move the gira ticket, run cube cuddle apply, and loop in chevonne.")
+            message = Self.insertedMessage(changes: result.changes.count)
+            setLastDictationChange(LastDictationChange(sessionID: UUID(), original: result.original, changes: result.changes, time: Date(timeIntervalSince1970: 1_800_000_000)))
+        }
         if state == "practice-unloading" { isPracticeSession = true; workerBusy = true }
         if state == "model-busy" { modelBusy = true }
         if state == "practice-recording" || state == "practice-transcribing" {
@@ -1165,14 +1280,37 @@ final class AppModel: ObservableObject {
             let id = session.begin()!; _ = session.recording(id)
             if state == "practice-transcribing" { _ = session.stopped(id) }
         }
-        if state == "recovery" || state == "practice-recovery" {
+        if state == "recovery" || state == "practice-recovery" || state == "recovery-dictionary" {
             isPracticeSession = state == "practice-recovery"
-            let id = session.begin()!; _ = session.recover("The best ideas often start as a few ordinary words. Let’s make a little room for them.", id: id)
+            let words = state == "recovery-dictionary" ? "I moved the ticket to gira and asked shivon to review it."
+                : "The best ideas often start as a few ordinary words. Let’s make a little room for them."
+            // The same step as a dictation result: with no dictionary in use, the words are unchanged.
+            let id = session.begin()!; _ = session.recover(dictionaryMatcher.apply(to: words), id: id)
             recoveryReason = .focusChanged; recoveryDetail = RecoveryReason.focusChanged.explanation
         } else if state == "recording" {
             let id = session.begin()!; _ = session.recording(id); elapsed = 12; level = 0.45; audioFlowing = true
         }
         notify()
     }
-    func shutdown() { flushNoteEdits(); cancel(cause: .shutdown); restoreOutputIfNeeded(); modelTask?.cancel(); shortcut.shutdown() }
+    func shutdown() {
+        flushNoteEdits(); cancel(cause: .shutdown); clearLastDictationChange(); practiceChange = nil
+        restoreOutputIfNeeded(); modelTask?.cancel(); shortcut.shutdown()
+    }
+}
+
+/// In memory only: what Copy original transcription copies and the pairs the row shows, never the inserted text.
+struct LastDictationChange: Equatable {
+    let sessionID: UUID
+    let original: String
+    let changes: [DictionaryChange]
+    let time: Date
+}
+
+/// The last practice result the dictionary changed. Restorable until the practice text is edited.
+struct PracticeChange: Equatable {
+    let separator: String
+    let text: String
+    let original: String
+    let changes: [DictionaryChange]
+    var restorable = true
 }
