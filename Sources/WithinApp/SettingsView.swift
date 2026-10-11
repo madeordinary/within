@@ -266,9 +266,15 @@ struct SettingsView: View {
     @State private var pendingRetention: HistoryRetention?
     @State private var confirmingMeetingsDelete = false
     static let sections = [("General", "slider.horizontal.3"), ("Audio", "mic"), ("History", "clock.arrow.circlepath"), ("Privacy", "hand.raised"), ("Model", "internaldrive"), ("About", "info.circle")]
-    /// Dictionary sits after Audio, and only behind the developer default.
-    static func sections(showingDictionary: Bool) -> [(String, String)] {
-        showingDictionary ? Array(sections.prefix(2)) + [("Dictionary", "character.book.closed")] + sections.dropFirst(2) : sections
+    /// Dictionary sits after Audio and Meetings after History, each only behind its developer default.
+    static func sections(showingDictionary: Bool, showingMeetings: Bool = false) -> [(String, String)] {
+        var shown = showingDictionary ? Array(sections.prefix(2)) + [("Dictionary", "character.book.closed")] + sections.dropFirst(2) : sections
+        if showingMeetings, let history = shown.firstIndex(where: { $0.0 == "History" }) { shown.insert(("Meetings", "person.2.wave.2"), at: history + 1) }
+        return shown
+    }
+    /// The sections the sidebar lists for this model.
+    static func sections(for model: AppModel) -> [(String, String)] {
+        sections(showingDictionary: model.showsPersonalDictionary, showingMeetings: model.showsMeetingsSpace)
     }
     var body: some View {
             page {
@@ -291,7 +297,8 @@ struct SettingsView: View {
                 heading("Your microphone", detail: "Choose an input. Within never silently switches it during dictation.")
                 MicrophoneControls(model: model).withinSurface()
                 VStack(alignment: .leading, spacing: 18) {
-                    PermissionRow(title: "Microphone", detail: "Used only after you start dictation.", allowed: model.microphoneAllowed, action: model.requestMicrophone)
+                    PermissionRow(title: "Microphone", detail: model.showsMeetingsSpace ? "Used only after you start dictation, a note recording or meeting notes." : "Used only after you start dictation.",
+                                  allowed: model.microphoneAllowed, action: model.requestMicrophone)
                     Divider()
                     PermissionRow(title: "Accessibility", detail: "Inserts into your original field and checks focus. Optional for practice and Copy.", allowed: model.accessibilityAllowed, action: model.requestAccessibility)
                 }.withinSurface()
@@ -321,6 +328,9 @@ struct SettingsView: View {
                     Label(model.effectiveRetention.keepsHistory ? "No recordings saved · dictation history stays on this Mac" : "No recordings or dictation history saved", systemImage: "clock.badge.xmark")
                     Label("No account, analytics, or cloud fallback", systemImage: "lock.shield")
                     if model.showsPersonalDictionary { Label("Your dictionary is never uploaded", systemImage: "character.book.closed") }
+                    if model.showsMeetingsSpace {
+                        Label(meetingNotesLine, systemImage: "person.2.wave.2")
+                    }
                     Text("Audio and pending words stay in memory. Copy uses your clipboard only when you choose it. Quitting clears pending text.")
                         .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                 }.withinSurface()
@@ -344,6 +354,8 @@ struct SettingsView: View {
                 ModelPanel(model: model).withinSurface()
             case "Dictionary" where model.showsPersonalDictionary:
                 DictionaryPage(model: model)
+            case "Meetings" where model.showsMeetingsSpace:
+                MeetingSettingsPage(model: model)
             case "About":
                 Brand()
                 Text("A little more room to think.").font(Typography.display(24))
@@ -383,7 +395,7 @@ struct SettingsView: View {
                 Button("Delete meetings", role: .destructive, action: model.deleteAllMeetings)
                 Button("Keep meetings", role: .cancel) {}
             } message: {
-                Text("Their transcripts and notes will be removed from this Mac. It cannot be undone. Within keeps meetings out of Time Machine backups; other backup apps may still have copies.")
+                Text("Their transcripts and notes will be removed from this Mac. It cannot be undone. \(meetingBackupCopies)")
             }
             .confirmationDialog("Enable compatibility paste?", isPresented: $pasteDisclosure) {
                 Button("Enable compatibility paste") { model.compatibilityPaste = true }
@@ -392,14 +404,40 @@ struct SettingsView: View {
                 Text("Your words will temporarily enter the clipboard. Other apps, clipboard managers, and Universal Clipboard may read or sync them. Clipboard restoration is best effort; you must review the insertion result.")
             }
     }
+    /// Settings → Privacy's line while the Meetings space is visible; Time Machine is named, since it is what the switch decides.
+    private var meetingNotesLine: String {
+        switch model.meetingBackupStatus {
+        case .included: return "Meeting notes stay on this Mac and its Time Machine backups"
+        case .excluded: return "Meeting notes stay on this Mac, out of Time Machine backups"
+        case .excludedAfterIncluded: return "Meeting notes stay on this Mac, out of new Time Machine backups"
+        // The backup choice couldn't be applied, so nothing is claimed about backups.
+        case .unconfirmed: return "Meeting notes stay on this Mac"
+        }
+    }
+    /// What Delete all can't reach.
+    private var meetingBackupCopies: String {
+        switch model.meetingBackupStatus {
+        case .included: return "They were included in Time Machine backups, which may keep copies; other backup apps may too."
+        case .excluded: return "Within keeps meetings out of Time Machine backups; other backup apps may still have copies."
+        case .excludedAfterIncluded: return "Time Machine backups made while meetings were included may keep copies; other backup apps may too."
+        case .unconfirmed: return "Time Machine and other backup apps may keep copies."
+        }
+    }
     private var savedMeetings: some View {
         let count = model.savedMeetingCount
         let kept = model.meetingRetention == .untilDeleted ? "Kept until you delete them"
             : "Each is deleted \(model.meetingRetention.title) after it was last transcribed"
         let title = model.meetingsUnlistable ? "Saved meetings couldn’t be listed on this Mac."
             : count == 1 ? "1 meeting is saved on this Mac." : "\(count) meetings are saved on this Mac."
+        let backups: String = switch model.meetingBackupStatus {
+        case .included: ", and included in Time Machine backups."
+        case .excluded: ", and left out of Time Machine backups."
+        case .excludedAfterIncluded: ", and left out of new Time Machine backups; earlier ones may keep copies."
+        // The failure line below says the choice couldn't be applied.
+        case .unconfirmed: "."
+        }
         let detail = model.meetingsUnlistable ? "From the Meetings developer preview. Show the folder in Finder to check its permissions."
-            : "From the Meetings developer preview. \(kept), and left out of Time Machine backups."
+            : "From the Meetings developer preview. \(kept)\(backups)"
         return VStack(alignment: .leading, spacing: 12) {
             row(title, detail: detail) {
                 HStack(spacing: 8) {
@@ -413,6 +451,7 @@ struct SettingsView: View {
             if !model.meetingsMessage.isEmpty {
                 Text(model.meetingsMessage).font(.system(size: 12)).foregroundStyle(Palette.warning)
             }
+            if !model.meetingBackupMessage.isEmpty { MeetingBackupFailure(model: model) }
         }.withinSurface(padding: 16)
     }
     /// Shortening retention or turning history off asks before anything is deleted.
@@ -457,6 +496,9 @@ struct HelpView: View {
                 help("Try it here first", icon: "waveform", text: "Expand Try dictation on Home. Opening the practice area does not record; choose Start practice or use the shortcut while the area is open and Within is active. Your practice words stay until you clear them or quit.")
                 Button("Try dictation") { model.showPractice?() }.disabled(model.workerBusy)
                 help("When words need review", icon: "text.bubble", text: "If the destination changes or insertion is uncertain, Within keeps your words for review. Return rechecks the original field. Copy uses the clipboard only when you choose it. Closing recovery keeps pending words in memory; Discard removes them after confirmation.")
+                if model.showsMeetingsSpace {
+                    help("Meeting notes", icon: "person.2.wave.2", text: MeetingSettingsPage.help)
+                }
                 if model.showsPersonalDictionary {
                     help("Your words, your spelling", icon: "character.book.closed", text: "Add names and terms in Settings → Dictionary. After transcription, Within replaces whole words you listed, in any capitalization, with your spelling. It applies to dictation and practice. When your words need review, choose Use original transcription to see what Within first wrote. After an insertion, the Dictation space and the menu bar offer the original transcription for a few minutes; copy it and replace the text yourself if you need to.")
                     Button("Open dictionary", action: model.openDictionarySettings)
@@ -521,6 +563,125 @@ struct UpdatesPanel: View {
                 Toggle("Check automatically once a week", isOn: Binding(get: { model.automaticUpdateChecks == true }, set: model.setAutomaticUpdateChecks))
                     .labelsHidden().toggleStyle(.switch)
             }
+        }
+    }
+}
+
+/// Settings → Meetings, only while the space is visible: how long meetings are kept, backups, the permissions a meeting
+/// uses and the notice. Nothing here starts capture or asks macOS for a permission by itself.
+struct MeetingSettingsPage: View {
+    /// A shorter retention that would delete saved meetings, waiting for the user's answer.
+    private struct PendingRetention { let retention: DocumentRetention; let count: Int }
+    static let help = "Open Meetings and choose New meeting. Nothing listens until you confirm that everyone in the meeting knows it’s being transcribed and choose Start meeting. Your microphone is labelled You and, if you include it, Zoom’s sound is labelled Others; labels are sources, not people. Pause, a lock or sleep stops listening, and nothing resumes on its own. Dictation and note recording wait until you finish. The transcript and your notes are saved on this Mac as you go; audio is never kept. Export saves a Markdown copy only where you choose."
+    static let systemAudio = "Lets Within hear Zoom’s sound when you include it in a meeting. macOS doesn’t limit this permission to one app: it lets an app record sound from any app on this Mac. Within uses it only for Zoom, and only while meeting notes are on. macOS doesn’t tell Within whether it’s allowed; you can check it in System Settings under Privacy & Security."
+    @ObservedObject var model: AppModel
+    @State private var pending: PendingRetention?
+    @State private var noticeCopied: Bool?
+    @State private var counting: Task<Void, Never>?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Your meeting notes").font(Typography.display(26)).accessibilityAddTraits(.isHeader)
+                Text("Saved on this Mac. Nothing listens until you choose Start meeting, and audio is never kept.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.secondary)
+            }
+            VStack(alignment: .leading, spacing: 14) {
+                Text("Keep meetings").font(.system(size: 13, weight: .medium))
+                MeetingRetentionPicker(selection: Binding(get: { model.meetingRetention }, set: request))
+                Text(retentionDetail).font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+            }.withinSurface()
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Include meetings in Time Machine backups").font(.system(size: 13, weight: .medium))
+                        Text(backupDetail).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Toggle("Include meetings in Time Machine backups", isOn: Binding(get: { model.meetingBackups }, set: model.setMeetingBackups))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                if !model.meetingBackupMessage.isEmpty { MeetingBackupFailure(model: model) }
+            }.withinSurface(padding: 16)
+            VStack(alignment: .leading, spacing: 18) {
+                PermissionRow(title: "Microphone", detail: "Transcribed as You, only after you choose Start meeting, Resume or Continue.",
+                              allowed: model.microphoneAllowed, action: model.requestMicrophone)
+                Divider()
+                PermissionRow(title: "System Audio Recording", detail: Self.systemAudio, display: .unknown, action: model.openPrivacySettings)
+            }.withinSurface()
+            VStack(alignment: .leading, spacing: 12) {
+                Text("A notice for the call").font(.system(size: 13, weight: .semibold))
+                Text("Within never posts anything in a call. To let people know, copy this notice and paste it into the meeting chat yourself.")
+                    .font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                MeetingNoticeButton(model: model, copied: $noticeCopied)
+            }.withinSurface()
+        }
+        .onDisappear { counting?.cancel() }
+        .confirmationDialog(prompt, isPresented: Binding(get: { pending != nil }, set: { if !$0 { pending = nil } })) {
+            Button("Delete older meetings", role: .destructive) {
+                if let pending { model.chooseMeetingRetention(pending.retention) }
+                pending = nil
+            }
+            Button("Keep them", role: .cancel) { pending = nil }
+        } message: { Text("Age counts from when each meeting was last transcribed. This can’t be undone; existing backups may keep earlier copies.") }
+    }
+
+    private var retentionDetail: String {
+        model.meetingRetention == .untilDeleted ? "Meetings stay until you delete them. Existing backups may keep copies of deleted meetings."
+            : "Each meeting is deleted \(model.meetingRetention.title) after it was last transcribed; an open meeting never is. Existing backups may keep copies of deleted meetings."
+    }
+
+    private var backupDetail: String {
+        model.meetingBackups ? "Meetings hold other people’s words. Turning this off keeps them out of new backups, but doesn’t remove copies already backed up. Other backup apps may not follow this setting."
+            : model.meetingBackupsWereIncluded ? "Meetings hold other people’s words, so Within keeps them out of new Time Machine backups. Copies backed up while this was on stay in those backups. Other backup apps may not follow this setting."
+            : "Off unless you turn it on. Meetings hold other people’s words, so Within keeps them out of Time Machine. Other backup apps may not follow this setting."
+    }
+
+    private var prompt: String {
+        guard let pending else { return "" }
+        return "Keep \(pending.retention.title) and delete \(pending.count == 1 ? "1 meeting" : "\(pending.count) meetings")?"
+    }
+
+    /// A setting that would delete saved meetings asks first, with the count read from the folder.
+    private func request(_ retention: DocumentRetention) {
+        guard retention != model.meetingRetention else { return }
+        counting?.cancel()
+        counting = Task {
+            let count = await model.meetingsExpiring(under: retention)
+            guard !Task.isCancelled else { return }
+            if count > 0 { pending = PendingRetention(retention: retention, count: count) } else { model.chooseMeetingRetention(retention) }
+        }
+    }
+}
+
+/// Keep until deleted, or 30, 90 or 365 days after a meeting was last transcribed.
+private struct MeetingRetentionPicker: View {
+    @Binding var selection: DocumentRetention
+    var body: some View {
+        HStack(spacing: 8) {
+            ForEach(DocumentRetention.allCases, id: \.self) { option in
+                let selected = option == selection
+                Button { selection = option } label: {
+                    Text(option.title).font(.system(size: 12, weight: selected ? .semibold : .regular))
+                        .padding(.horizontal, 12).padding(.vertical, 7)
+                        .foregroundStyle(selected ? Palette.canvas : Palette.text)
+                        .background(selected ? AnyShapeStyle(Palette.text) : AnyShapeStyle(Palette.tint.opacity(0.7)), in: Capsule())
+                        .contentShape(Capsule())
+                }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }.accessibilityElement(children: .contain).accessibilityLabel("Keep meetings")
+    }
+}
+
+/// The backup choice couldn't reach the meetings folder: said where the choice is shown, with Try again.
+private struct MeetingBackupFailure: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        HStack(spacing: 10) {
+            Label(model.meetingBackupMessage, systemImage: "exclamationmark.triangle").font(.system(size: 12)).foregroundStyle(Palette.warning)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+            Button("Try again", action: model.applyMeetingBackups).quietAction()
         }
     }
 }

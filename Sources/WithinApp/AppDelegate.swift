@@ -17,6 +17,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var reviewItem: NSMenuItem?
     private var originalItem: NSMenuItem?
     private var quitItem: NSMenuItem?
+    /// File → New Meeting…, which takes ⌘N only while the Meetings space shows, as Notes' own button does there.
+    private var newMeetingItem: NSMenuItem?
     private var localKeyMonitor: Any?
     private var lockDescriptor: Int32 = -1
     private var finishingMeetingToQuit = false
@@ -170,12 +172,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         hideOthers.keyEquivalentModifierMask = [.command, .option]; application.addItem(hideOthers)
         application.addItem(NSMenuItem(title: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: ""))
         application.addItem(.separator()); application.addItem(item("Quit Within", #selector(quit), key: "q")); menu.addItem(root)
-        let file = NSMenuItem(title: "File", action: nil, keyEquivalent: ""); file.submenu = NSMenu(title: "File")
-        file.submenu?.addItem(item("Open Within", #selector(openWithin), key: "0"))
-        file.submenu?.addItem(item("Practice Dictation…", #selector(openPractice)))
-        file.submenu?.addItem(item("Set Up Within…", #selector(openSetup)))
-        file.submenu?.addItem(.separator())
-        file.submenu?.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")); menu.addItem(file)
+        let file = NSMenuItem(title: "File", action: nil, keyEquivalent: ""); file.submenu = makeFileMenu(showingMeetings: model.showsMeetingsSpace)
+        menu.addItem(file)
         let edit = NSMenuItem(title: "Edit", action: nil, keyEquivalent: ""); edit.submenu = NSMenu(title: "Edit")
         for (name, selector, key) in [("Undo", Selector(("undo:")), "z"), ("Cut", #selector(NSText.cut(_:)), "x"), ("Copy", #selector(NSText.copy(_:)), "c"), ("Paste", #selector(NSText.paste(_:)), "v"), ("Select All", #selector(NSText.selectAll(_:)), "a")] {
             edit.submenu?.addItem(NSMenuItem(title: name, action: selector, keyEquivalent: key))
@@ -191,8 +189,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.mainMenu = menu
     }
 
-    private func item(_ title: String, _ action: Selector, key: String = "") -> NSMenuItem {
-        let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self; return item
+    /// The File menu. Its Meeting group exists only while the Meetings space is visible.
+    func makeFileMenu(showingMeetings: Bool) -> NSMenu {
+        let file = NSMenu(title: "File")
+        file.addItem(item("Open Within", #selector(openWithin), key: "0"))
+        file.addItem(item("Practice Dictation…", #selector(openPractice)))
+        file.addItem(item("Set Up Within…", #selector(openSetup)))
+        if showingMeetings {
+            file.addItem(.separator())
+            let newItem = item("New Meeting…", #selector(newMeeting)); newMeetingItem = newItem; file.addItem(newItem)
+            file.addItem(item("Pause Meeting", #selector(pauseOrResumeMeeting), key: "p", modifiers: [.command, .shift]))
+            file.addItem(item("Finish Meeting", #selector(finishMeeting), key: "f", modifiers: [.command, .shift]))
+            file.addItem(item("Discard Meeting…", #selector(discardMeeting)))
+            file.addItem(item("All Meetings", #selector(allMeetings), key: "["))
+        }
+        file.addItem(.separator())
+        file.addItem(NSMenuItem(title: "Close Window", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        return file
+    }
+
+    private func item(_ title: String, _ action: Selector, key: String = "", modifiers: NSEvent.ModifierFlags = .command) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key); item.target = self
+        if modifiers != .command { item.keyEquivalentModifierMask = modifiers }
+        return item
     }
     @objc private func toggleDictation() { if model.isActive { model.stop() } else { model.startFromCurrentWindow() } }
     @objc private func cancelDictation() { model.cancel() }
@@ -208,8 +227,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc private func openPractice() { showPracticeWindow() }
     /// A second terminate while Finish and Quit saves would end the app at once, so it does nothing then.
     @objc private func quit() { if !finishingMeetingToQuit { NSApp.terminate(nil) } }
+    /// Setup for a new meeting; nothing starts until its Start meeting.
+    @objc private func newMeeting() { if navigate(to: .meetings) { model.newMeeting() } }
+    /// Resume needing the acknowledgment shows the meeting's checkbox instead, since only it can give one.
+    @objc private func pauseOrResumeMeeting() {
+        guard model.meetings.phase == .paused else { model.meetings.pause(); return }
+        if model.meetings.needsAcknowledgment { if navigate(to: .meetings) { model.meetingsFocusRequest = .acknowledgment } }
+        else { model.resumeMeeting(acknowledged: false) }
+    }
+    @objc private func finishMeeting() {
+        navigate(to: .meetings)
+        Task { await model.finishMeeting() }
+    }
+    @objc private func discardMeeting() {
+        let alert = NSAlert(); alert.messageText = "Discard this meeting?"
+        alert.informativeText = "Capture stops and its transcript and notes are deleted from this Mac."
+        alert.addButton(withTitle: "Keep meeting"); alert.addButton(withTitle: "Discard meeting")
+        alert.buttons.last?.hasDestructiveAction = true
+        guard runConfirmation(alert) == .alertSecondButtonReturn, model.meetings.isOpen else { return }
+        Task { await model.discardMeeting() }
+    }
+    @objc private func allMeetings() { if navigate(to: .meetings) { model.showAllMeetings() } }
+
+    enum MeetingMenuAction { case newMeeting, pauseOrResume, finish, discard, allMeetings }
+    struct MeetingMenuState: Equatable {
+        let title: String
+        let enabled: Bool
+        /// Why an item that would start or open a meeting is unavailable, as its tooltip.
+        var reason: String?
+    }
+    private static let meetingActions: [Selector: MeetingMenuAction] = [#selector(AppDelegate.newMeeting): .newMeeting,
+        #selector(AppDelegate.pauseOrResumeMeeting): .pauseOrResume, #selector(AppDelegate.finishMeeting): .finish,
+        #selector(AppDelegate.discardMeeting): .discard, #selector(AppDelegate.allMeetings): .allMeetings]
+    static let meetingOpenReason = "Finish or discard the current meeting first."
+    /// The Meeting group's titles and whether each can act now. What starts capture gives the same reasons, in the
+    /// same order, as a refused start: what holds capture first, then whether Within is ready.
+    static func meetingMenuState(_ action: MeetingMenuAction, model: AppModel, page: AppPage) -> MeetingMenuState {
+        let meetings = model.meetings
+        switch action {
+        case .newMeeting:
+            let reason = meetings.isOpen ? meetingOpenReason : model.meetingHeldMessage ?? model.meetingStartBlocker
+            return MeetingMenuState(title: "New Meeting…", enabled: reason == nil, reason: reason)
+        case .pauseOrResume:
+            guard meetings.phase == .paused else {
+                return MeetingMenuState(title: "Pause Meeting", enabled: meetings.phase == .preparing || meetings.phase == .recording)
+            }
+            let reason = model.meetingStartBlocker
+            return MeetingMenuState(title: meetings.needsAcknowledgment ? "Resume Meeting…" : "Resume Meeting", enabled: reason == nil, reason: reason)
+        case .finish:
+            return MeetingMenuState(title: "Finish Meeting", enabled: [.preparing, .recording, .pausing, .paused].contains(meetings.phase))
+        case .discard:
+            return MeetingMenuState(title: "Discard Meeting…", enabled: meetings.isOpen && meetings.phase != .discarding)
+        case .allMeetings:
+            return MeetingMenuState(title: "All Meetings", enabled: page == .meetings && !meetings.isOpen && !meetings.deletionPending && model.meetingsRoute != .library)
+        }
+    }
     /// The app menu enables its items itself; its Quit says what is happening while the meeting saves.
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if let selector = menuItem.action, let action = Self.meetingActions[selector], let model {
+            let state = Self.meetingMenuState(action, model: model, page: navigation.page)
+            menuItem.title = state.title; menuItem.toolTip = state.reason
+            return state.enabled
+        }
         guard menuItem.action == #selector(quit) else { return true }
         menuItem.title = finishingMeetingToQuit ? Self.finishingTitle : "Quit Within"
         return !finishingMeetingToQuit
@@ -284,13 +363,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         return changed
     }
     private func updateWindowChrome() {
-        switch navigation.page {
-        case .home: mainWindow?.title = "Within"
-        case .notes: mainWindow?.title = "Notes · Within"
-        case .settings: mainWindow?.title = "Settings · Within"
-        case .help: mainWindow?.title = "Help · Within"
-        case .setup: mainWindow?.title = "Set Up Within"
-        case .recovery: mainWindow?.title = "Your words · Within"
+        mainWindow?.title = Self.windowTitle(navigation.page)
+        newMeetingItem?.keyEquivalent = navigation.page == .meetings ? "n" : ""
+    }
+    /// A meeting's own title never reaches the window title, which Mission Control and screen sharing show.
+    static func windowTitle(_ page: AppPage) -> String {
+        switch page {
+        case .home: return "Within"
+        case .notes: return "Notes · Within"
+        case .meetings: return "Meetings · Within"
+        case .settings: return "Settings · Within"
+        case .help: return "Help · Within"
+        case .setup: return "Set Up Within"
+        case .recovery: return "Your words · Within"
         }
     }
     func windowDidEndSheet(_ notification: Notification) {

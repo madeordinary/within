@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import WithinCore
 
 /// A named fixture pasteboard that refuses every write, for the copy-failure paths.
@@ -11,7 +12,7 @@ private final class RefusingPasteboard: NSPasteboard {
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary", "showMeetingsSpace", "meetingRetention"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary", "showMeetingsSpace", "meetingRetention", "meetingBackups"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -387,15 +388,30 @@ func nativeChecks(to output: URL) throws {
     // The meetings backup choice, in temporary folders: out of backups from the first save by default; a store that
     // includes them leaves its new folder in; a choice applied to an existing folder sets or clears it, and clears a
     // file's own exclusion when including; a store built with an older choice never undoes it; no folder, nothing made.
-    func inBackups(_ url: URL) -> Bool {
-        var fresh = URL(fileURLWithPath: url.path); fresh.removeAllCachedResourceValues()
-        return (try? fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) == false
+    // Read from the extended attribute that holds the exclusion, on the item and its folder (a file in an excluded folder
+    // is excluded): reading `isExcludedFromBackup` through URL resource values keeps the value in this process, and a
+    // later write of it can then do nothing. The mark can also land a few milliseconds after a write returns, so each
+    // check waits up to a second for the state it expects; a choice that never lands still fails.
+    func excludedMark(_ url: URL) -> Bool { getxattr(url.path, "com.apple.metadata:com_apple_backup_excludeItem", nil, 0, 0, 0) >= 0 }
+    func settles(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(1)
+        while !condition(), Date() < deadline { usleep(5_000) }
+        return condition()
+    }
+    func inBackups(_ url: URL) -> Bool { settles { !excludedMark(url) && !excludedMark(url.deletingLastPathComponent()) } }
+    func leftOutOfBackups(_ url: URL) -> Bool { settles { excludedMark(url) || excludedMark(url.deletingLastPathComponent()) } }
+    /// A file's own exclusion, as another app would leave it, landed before the store is asked to clear it.
+    func markOwn(_ url: URL) throws {
+        var item = url
+        var values = URLResourceValues(); values.isExcludedFromBackup = true
+        try item.setResourceValues(values)
+        _ = settles { excludedMark(url) }
     }
     let choiceBase = meetingsBase.appendingPathComponent("Choice", isDirectory: true)
     let defaultChoice = MeetingStore(meetingsIn: choiceBase.appendingPathComponent("Default", isDirectory: true))
     try defaultChoice.save(fixtureMeeting)
     let choiceFile = defaultChoice.directory.appendingPathComponent(meetingFile.lastPathComponent)
-    let excludedByDefault = defaultChoice.excludedFromBackup && !inBackups(defaultChoice.directory) && !inBackups(choiceFile)
+    let excludedByDefault = defaultChoice.excludedFromBackup && leftOutOfBackups(defaultChoice.directory) && leftOutOfBackups(choiceFile)
     let includedChoice = MeetingStore(meetingsIn: choiceBase.appendingPathComponent("Included", isDirectory: true), excludedFromBackup: false)
     try includedChoice.save(fixtureMeeting)
     let includedFromFirstSave = inBackups(includedChoice.directory) && inBackups(includedChoice.directory.appendingPathComponent(meetingFile.lastPathComponent))
@@ -403,10 +419,8 @@ func nativeChecks(to output: URL) throws {
     let included = try including.applyBackupChoice() && inBackups(defaultChoice.directory) && inBackups(choiceFile)
     try defaultChoice.save(fixtureMeeting)
     let olderChoiceKept = inBackups(defaultChoice.directory) && names(defaultChoice.directory) == [meetingFile.lastPathComponent]
-    let excludedAgain = try defaultChoice.applyBackupChoice() && !inBackups(defaultChoice.directory) && !inBackups(choiceFile)
-    var ownExclusion = choiceFile
-    var excludedValue = URLResourceValues(); excludedValue.isExcludedFromBackup = true
-    try ownExclusion.setResourceValues(excludedValue)
+    let excludedAgain = try defaultChoice.applyBackupChoice() && leftOutOfBackups(defaultChoice.directory) && leftOutOfBackups(choiceFile)
+    try markOwn(choiceFile)
     let ownExclusionCleared = try including.applyBackupChoice() && inBackups(defaultChoice.directory) && inBackups(choiceFile)
     let absentBase = choiceBase.appendingPathComponent("Absent", isDirectory: true)
     let absentLeftAlone = try !MeetingStore(meetingsIn: absentBase, excludedFromBackup: false).applyBackupChoice()
@@ -536,7 +550,7 @@ func nativeChecks(to output: URL) throws {
     let crashFinished = recovered?.state == .finished && recovered?.stretches.last?.end == 42 && recovered?.stretches.last?.ended == .unexpectedExit
         && recovered?.segments == crashedMeeting.segments
     let upkeepFiles = [crashedMeeting.id, recentMeeting.id].map { "\($0.uuidString).json" } + [unreadableMeeting.lastPathComponent]
-    let upkeepLaunchPassed = launched == MeetingUpkeep.Result(saved: 3, recovered: 1, deleted: 1, pruned: 1) && crashFinished
+    let upkeepLaunchPassed = launched == MeetingUpkeep.Result(saved: 3, recovered: 1, deleted: 1, pruned: 1, recoveredIDs: [crashedMeeting.id]) && crashFinished
         && Set(remaining.documents.map(\.id)) == [crashedMeeting.id, recentMeeting.id] && remaining.unreadable == 1
         && names(upkeepStore.directory) == upkeepFiles.sorted() && names(upkeepBase) == ["Meetings.noindex"]
         && mode(upkeepStore.directory.appendingPathComponent("\(crashedMeeting.id.uuidString).json")) == 0o600
@@ -733,6 +747,362 @@ func nativeChecks(to output: URL) throws {
     let updatesPassed = muteDefaultOff && updatePreview.availableUpdate?.build == 12 && !updatePreview.checkingForUpdates
         && updatePreview.automaticUpdateChecks == false && fixture("ready").automaticUpdateChecks == nil
         && fixture("ready").updateSummary == "Not checked yet."
+    // The Meetings space. With the developer default off: no row, .meetings refused, and nothing loaded, created or started.
+    let meetingSpaceStartsBefore = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    let unusedMeetings = output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Meetings.noindex")
+    /// Lays the window out and draws it once, then lets its appear actions and tasks run.
+    func hostWindow(_ model: AppModel, _ navigation: AppNavigation, width: CGFloat = 900) {
+        let host = NSHostingView(rootView: AppWindowView(model: model, navigation: navigation, togglePractice: { _ in }))
+        host.frame = NSRect(x: 0, y: 0, width: width, height: 700)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        if let bitmap = host.bitmapImageRepForCachingDisplay(in: host.bounds) { host.cacheDisplay(in: host.bounds, to: bitmap) }
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        window.contentView = nil; window.orderOut(nil)
+    }
+    var meetingsSpaceHiddenPassed = true
+    for state in ["ready", "notes", "recording", "recovery", "settings-privacy-saved-meetings"] {
+        let model = fixture(state)
+        let hidden = AppNavigation()
+        model.loadMeetingLibrary(); model.newMeeting()
+        let refused = !hidden.navigate(to: .meetings, model: model, blocked: false, confirmPracticeExit: { false }) && hidden.page != .meetings
+        hostWindow(model, hidden)
+        meetingsSpaceHiddenPassed = meetingsSpaceHiddenPassed && refused && !model.showsMeetingsSpace && model.meetingLibrary.isEmpty
+            && model.meetingsRoute == .library && !model.openMeeting(MeetingPreviews.finished.id) && !model.startMeeting(title: "", acknowledged: true)
+            && model.meetings.meeting == nil && model.meetingsToReview.isEmpty
+    }
+    meetingsSpaceHiddenPassed = meetingsSpaceHiddenPassed && !FileManager.default.fileExists(atPath: unusedMeetings.path)
+    // Setup: Start waits for the acknowledgment and says so; what holds capture is named first, even when checked.
+    let setupModel = fixture("meeting-setup")
+    let startBlockersMatch = ["ready", "recording", "note-recording", "recovery", "practice-transcribing", "model-error", "missing-input", "setup"]
+        .allSatisfy { fixture($0).meetingStartBlocker == fixture($0).meetingStartRefusal() }
+    let meetingStartNeedsAcknowledgmentPassed = setupModel.meetingsRoute == .setup && startBlockersMatch
+        && MeetingAcknowledgment.blocker(acknowledged: false, refusal: setupModel.meetingStartBlocker) == "Check the box above to start."
+        && MeetingAcknowledgment.blocker(acknowledged: true, refusal: setupModel.meetingStartBlocker) == nil
+        && MeetingAcknowledgment.blocker(acknowledged: true, refusal: fixture("recording").meetingStartBlocker) == "Finish dictating to start meeting notes."
+        && !setupModel.startMeeting(title: "Synthetic", acknowledged: false) && setupModel.meetingsRoute == .setup && !setupModel.meetings.isOpen
+        && fixture("meeting-mic-only").meetingAppSoundSupported == false && fixture("meeting-setup-computer-audio-intro").includeZoomSound
+    // Navigating to and around the space, with the window drawn each time, never starts capture or writes a file.
+    let around = fixture("meetings-library")
+    let aroundNavigation = AppNavigation()
+    var navigationNeverCapturesPassed = aroundNavigation.navigate(to: .meetings, model: around, blocked: false, confirmPracticeExit: { false })
+    hostWindow(around, aroundNavigation)
+    around.newMeeting(); around.includeZoomSound = true; hostWindow(around, aroundNavigation)
+    navigationNeverCapturesPassed = navigationNeverCapturesPassed && around.meetingsRoute == .setup
+    around.showAllMeetings(); hostWindow(around, aroundNavigation, width: 720)
+    navigationNeverCapturesPassed = navigationNeverCapturesPassed && around.openMeeting(MeetingPreviews.recovered.id) && around.meetingsRoute == .meeting
+        && around.meetingsToReview.isEmpty && around.meetings.phase == .finished
+    hostWindow(around, aroundNavigation)
+    around.closeRecoveryNotice(MeetingPreviews.recovered.id); around.setShowingOriginalTranscription(true)
+    _ = aroundNavigation.navigate(to: .home, model: around, blocked: false, confirmPracticeExit: { false })
+    _ = aroundNavigation.navigate(to: .meetings, model: around, blocked: false, confirmPracticeExit: { false })
+    hostWindow(around, aroundNavigation)
+    around.showAllMeetings()
+    _ = around.searchMeetings("planning")
+    hostWindow(around, aroundNavigation)
+    navigationNeverCapturesPassed = navigationNeverCapturesPassed && around.phase == .ready && !around.workerBusy && !around.meetings.isOpen
+        && around.meetingsRoute == .library && (around.meetingsFocusRequest == .row(MeetingPreviews.recovered.id) || around.meetingsFocusRequest == nil)
+    // An open meeting keeps the space on it: no library, setup or other meeting, and its phase and session stay as they were.
+    for state in ["meeting-recording", "meeting-paused"] {
+        let model = fixture(state)
+        let openNavigation = AppNavigation()
+        let phase = model.meetings.phase, session = model.phase
+        let navigated = openNavigation.navigate(to: .meetings, model: model, blocked: false, confirmPracticeExit: { false })
+        model.showAllMeetings(); model.newMeeting()
+        hostWindow(model, openNavigation); hostWindow(model, openNavigation, width: 720)
+        navigationNeverCapturesPassed = navigationNeverCapturesPassed && navigated && model.meetingsRoute == .meeting
+            && !model.openMeeting(MeetingPreviews.finished.id) && model.meetings.phase == phase && model.phase == session
+            && [MeetingPreviews.live.id, MeetingPreviews.paused(.pauseButton).id].contains(model.meetings.meeting?.id)
+    }
+    navigationNeverCapturesPassed = navigationNeverCapturesPassed && !FileManager.default.fileExists(atPath: unusedMeetings.path)
+        && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == meetingSpaceStartsBefore
+    // Home during a meeting: its own status with Show meeting, never dictation's Stop or Cancel; the sidebar says the state in words.
+    var meetingHomePassed = SessionStatusView.showsDictationControls(fixture("recording")) && SessionStatusView.showsDictationControls(fixture("ready"))
+    for state in ["home-during-meeting", "home-meeting-recording", "home-meeting-paused", "home-meeting-finishing", "meeting-resume-acknowledge", "meeting-call-ended"] {
+        let model = fixture(state)
+        meetingHomePassed = meetingHomePassed && model.meetings.isOpen && model.activeCapture == .meeting && !SessionStatusView.showsDictationControls(model)
+    }
+    meetingHomePassed = meetingHomePassed && SidebarView.meetingsBadge(phase: .recording, toReview: 2) == "Recording"
+        && SidebarView.meetingsBadge(phase: .preparing, toReview: 0) == "Recording" && SidebarView.meetingsBadge(phase: .paused, toReview: 0) == "Paused"
+        && SidebarView.meetingsBadge(phase: .finished, toReview: 1) == "1 to review" && SidebarView.meetingsBadge(phase: .idle, toReview: 0) == nil
+        && fixture("meetings-library").meetingsToReview == [MeetingPreviews.recovered.id]
+    // Dictionary fixes in a meeting: your spellings shown, the original on the toggle, export one version, the file's text unchanged.
+    let fixes = fixture("meeting-dictionary-fixes")
+    let original = MeetingPreviews.fixes.segments.map(\.text)
+    let shown = fixes.meetings.meeting?.segments.map(fixes.meetingTurnText) ?? []
+    var meetingDictionaryFixesPassed = fixes.meetings.meeting?.id == MeetingPreviews.fixes.id && fixes.meetingFixedTurns == 3 && shown.count == 4
+        && shown[0] == "Can you open the Jira board so Siobhan can see the sprint?" && shown[1] == "Sure. I’ll also run kubectl get pods to check staging."
+        && shown[2] == original[2] && shown[3] == "Nothing on my side. Siobhan has the release notes."
+        && fixes.meetingTurn(MeetingPreviews.fixes.segments[0]).changes.count == 2
+    fixes.setShowingOriginalTranscription(true)
+    let spellingsExport = fixes.meetingMarkdown(useOriginalTranscription: false) ?? "", originalExport = fixes.meetingMarkdown(useOriginalTranscription: true) ?? ""
+    meetingDictionaryFixesPassed = meetingDictionaryFixesPassed && fixes.meetings.meeting?.segments.map(fixes.meetingTurnText) == original
+        && fixes.meetings.meeting?.segments == MeetingPreviews.fixes.segments
+        && spellingsExport.contains("Jira") && !spellingsExport.contains("gira") && originalExport.contains("gira") && !originalExport.contains("Jira")
+    fixes.setShowingOriginalTranscription(false)
+    let plainMeeting = fixture("meeting-finished")
+    meetingDictionaryFixesPassed = meetingDictionaryFixesPassed && !fixes.showingOriginalTranscription && plainMeeting.meetingFixedTurns == 0
+        && plainMeeting.meetings.meeting?.segments.map(plainMeeting.meetingTurnText) == MeetingPreviews.finished.segments.map(\.text)
+    // Search finds a meeting by either spelling, and by neither once the dictionary is off.
+    let meetingSearchEitherSpellingPassed = fixes.searchMeetings("jira") == [MeetingPreviews.fixes.id] && fixes.searchMeetings("GIRA") == [MeetingPreviews.fixes.id]
+        && fixes.searchMeetings("siobhán") == [MeetingPreviews.fixes.id] && fixes.searchMeetings("kubectl get") == [MeetingPreviews.fixes.id]
+        && plainMeeting.searchMeetings("jira").isEmpty && plainMeeting.searchMeetings("sketch it") == [MeetingPreviews.finished.id]
+        && Set(plainMeeting.searchMeetings(" ")) == Set(plainMeeting.meetingLibrary.map(\.id))
+    // The library's own search runs off the main actor and finds the same meetings; a cancelled one returns nothing.
+    func awaitFind(_ model: AppModel, _ query: String, cancel: Bool = false) -> [UUID]?? {
+        var result: [UUID]??
+        let search = Task { @MainActor in result = .some(await model.findMeetings(query)) }
+        if cancel { search.cancel() }
+        let deadline = Date().addingTimeInterval(10)
+        while result == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        return result
+    }
+    let backgroundSearchPassed = awaitFind(fixes, "jira") == .some([MeetingPreviews.fixes.id]) && awaitFind(fixes, "gira") == .some([MeetingPreviews.fixes.id])
+        && awaitFind(plainMeeting, "jira") == .some([]) && awaitFind(fixes, "jira", cancel: true) == .some(nil)
+    // Copy notice writes only the notice, and only to the board it is given.
+    let noticeBoard = NSPasteboard(name: .init("Within.MeetingNoticeFixture.\(UUID().uuidString)"))
+    defer { noticeBoard.releaseGlobally() }
+    let meetingCopyNoticePassed = setupModel.copyMeetingNotice(to: noticeBoard) && noticeBoard.string(forType: .string) == AppModel.meetingNotice
+        && noticeBoard.pasteboardItems?.count == 1 && !setupModel.copyMeetingNotice(to: refusingBoard)
+    // Search time over a synthetic library of long meetings (counts and times only): fifty three-hour meetings of 2,000 turns each.
+    let searchWords = DictionaryMatcher(PersonalDictionary(entries: (0..<500).map {
+        DictionaryEntry(heardAs: ["wurd\($0)"], writeAs: "Wurd\($0)", created: Date(timeIntervalSince1970: 1_800_000_000 + Double($0)))
+    }))
+    let searchLibrary = (0..<50).map { meeting in
+        Meeting(created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom", segments: (0..<2_000).map { turn in
+            MeetingSegment(source: turn % 2 == 0 ? .you : .others, offset: Double(turn) * 5,
+                           text: (0..<15).map { "wurd\((meeting * 7 + turn * 15 + $0) % 900)" }.joined(separator: " ") + ".")
+        }, state: .finished)
+    }
+    func searchMilliseconds(_ dictionary: DictionaryMatcher) -> Int {
+        let start = ContinuousClock.now
+        _ = MeetingSearch.matching(searchLibrary, query: "absent synthetic phrase", dictionary: dictionary)
+        let elapsed = start.duration(to: .now).components
+        return Int(elapsed.seconds * 1000 + elapsed.attoseconds / 1_000_000_000_000_000)
+    }
+    let meetingSearchTiming: [String: Int] = ["meetings": searchLibrary.count, "turns": searchLibrary.count * 2_000,
+        "millisecondsWithDictionary": searchMilliseconds(searchWords), "millisecondsWithoutDictionary": searchMilliseconds(.empty)]
+    let meetingsSpacePassed = meetingsSpaceHiddenPassed && meetingStartNeedsAcknowledgmentPassed && navigationNeverCapturesPassed && meetingHomePassed
+        && meetingDictionaryFixesPassed && meetingSearchEitherSpellingPassed && backgroundSearchPassed && meetingCopyNoticePassed
+    /// Runs an async step to its end on the main run loop; nil if it took more than ten seconds.
+    func finished<T>(_ body: @escaping @MainActor () async -> T) -> T? {
+        var result: T?
+        Task { @MainActor in result = await body() }
+        let deadline = Date().addingTimeInterval(10)
+        while result == nil, Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        return result
+    }
+    // Settings → Meetings and the File menu's Meeting group exist only with the developer default on; a hidden model's
+    // Settings shown at "Meetings" draws nothing for it and creates nothing.
+    let meetingStartsBeforeSettings = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    let baseSections = ["General", "Audio", "History", "Privacy", "Model", "About"]
+    var meetingSettingsHiddenPassed = SettingsView.sections(showingDictionary: false).map(\.0) == baseSections
+        && SettingsView.sections(showingDictionary: true).map(\.0) == ["General", "Audio", "Dictionary", "History", "Privacy", "Model", "About"]
+        && SettingsView.sections(showingDictionary: true, showingMeetings: true).map(\.0) == ["General", "Audio", "Dictionary", "History", "Meetings", "Privacy", "Model", "About"]
+        && SettingsView.sections(for: fixture("settings-meetings")).map(\.0) == ["General", "Audio", "History", "Meetings", "Privacy", "Model", "About"]
+    for state in ["ready", "setup", "recording", "notes", "dictionary", "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-backups"] {
+        let model = fixture(state)
+        meetingSettingsHiddenPassed = meetingSettingsHiddenPassed && !model.showsMeetingsSpace
+            && SettingsView.sections(for: model).map(\.0) == SettingsView.sections(showingDictionary: model.showsPersonalDictionary).map(\.0)
+    }
+    let hiddenSettings = fixture("settings-privacy-saved-meetings")
+    let hiddenSettingsNavigation = AppNavigation()
+    _ = hiddenSettingsNavigation.navigate(to: .settings, model: hiddenSettings, blocked: false, confirmPracticeExit: { false })
+    hiddenSettings.settingsSection = "Meetings"
+    hostWindow(hiddenSettings, hiddenSettingsNavigation)
+    let fileTitles = { (menu: NSMenu) in menu.items.map { $0.isSeparatorItem ? "-" : $0.title } }
+    let meetingMenuTitles = ["New Meeting…", "Pause Meeting", "Finish Meeting", "Discard Meeting…", "All Meetings"]
+    let menuDelegate = AppDelegate()
+    let hiddenFileMenu = menuDelegate.makeFileMenu(showingMeetings: fixture("ready").showsMeetingsSpace)
+    let shownFileMenu = menuDelegate.makeFileMenu(showingMeetings: fixture("meetings-library").showsMeetingsSpace)
+    meetingSettingsHiddenPassed = meetingSettingsHiddenPassed && hiddenSettings.meetingRetention == .untilDeleted && !hiddenSettings.meetingBackups
+        && fileTitles(hiddenFileMenu) == ["Open Within", "Practice Dictation…", "Set Up Within…", "-", "Close Window"]
+        && fileTitles(shownFileMenu) == ["Open Within", "Practice Dictation…", "Set Up Within…", "-"] + meetingMenuTitles + ["-", "Close Window"]
+        && shownFileMenu.items.filter { meetingMenuTitles.contains($0.title) }.allSatisfy { $0.target === menuDelegate && $0.action != nil }
+        && AppDelegate.windowTitle(.meetings) == "Meetings · Within" && AppDelegate.windowTitle(.home) == "Within"
+    // Each menu item says what it does now. New Meeting and Resume give a refused start's reason, in its order.
+    func menuState(_ action: AppDelegate.MeetingMenuAction, _ state: String, page: AppPage = .meetings) -> AppDelegate.MeetingMenuState {
+        AppDelegate.meetingMenuState(action, model: fixture(state), page: page)
+    }
+    let meetingMenuStatesPassed = menuState(.newMeeting, "meetings-library") == .init(title: "New Meeting…", enabled: true)
+        && menuState(.newMeeting, "recording") == .init(title: "New Meeting…", enabled: false, reason: "Finish dictating to start meeting notes.")
+        && menuState(.newMeeting, "note-recording").reason == "Stop your note recording to start meeting notes."
+        && menuState(.newMeeting, "recovery").reason == "Review your pending dictation first."
+        && menuState(.newMeeting, "setup").reason == "Finish setup before recording."
+        && menuState(.newMeeting, "meeting-recording") == .init(title: "New Meeting…", enabled: false, reason: AppDelegate.meetingOpenReason)
+        && menuState(.pauseOrResume, "meeting-recording") == .init(title: "Pause Meeting", enabled: true)
+        && menuState(.pauseOrResume, "meeting-paused") == .init(title: "Resume Meeting", enabled: true)
+        && menuState(.pauseOrResume, "meeting-resume-acknowledge") == .init(title: "Resume Meeting…", enabled: true)
+        && menuState(.pauseOrResume, "meeting-finished") == .init(title: "Pause Meeting", enabled: false)
+        && menuState(.finish, "meeting-paused").enabled && menuState(.finish, "meeting-recording").enabled
+        && !menuState(.finish, "meeting-finished").enabled && !menuState(.finish, "home-meeting-finishing").enabled
+        && menuState(.discard, "meeting-paused").enabled && !menuState(.discard, "meeting-finished").enabled
+        && menuState(.allMeetings, "meeting-finished").enabled && menuState(.allMeetings, "meeting-setup").enabled
+        && !menuState(.allMeetings, "meeting-finished", page: .home).enabled && !menuState(.allMeetings, "meetings-library").enabled
+        && !menuState(.allMeetings, "meeting-recording").enabled
+    // The backups switch: only a stored true includes meetings. Previews and the hidden space never change it or write it.
+    let backupsShown = fixture("settings-meetings")
+    let backupsOffByDefault = !AppModel.storedMeetingBackups(nil) && AppModel.storedMeetingBackups(true) && !AppModel.storedMeetingBackups(false)
+        && !AppModel.storedMeetingBackups("true") && !backupsShown.meetingBackups && !fixture("ready").meetingBackups
+    backupsShown.setMeetingBackups(true)
+    let backupsTurnedOn = backupsShown.meetingBackups
+    backupsShown.setMeetingBackups(false)
+    let backupsHidden = fixture("settings-privacy-saved-meetings")
+    backupsHidden.setMeetingBackups(true)
+    // Through the controller's writer, in order with its saves, on temporary folders: with no folder nothing is made; a
+    // folder a later save creates takes the newest choice; an existing folder takes it at once, its files too.
+    let switchBase = meetingsBase.appendingPathComponent("Switch", isDirectory: true)
+    let switchStore = MeetingStore(meetingsIn: switchBase)
+    let switchWriter = MeetingCheckpointWriter(store: switchStore)
+    let switchMeeting = Meeting(title: "Synthetic switch", created: Date(timeIntervalSince1970: 1_800_000_000), appName: Meeting.microphoneOnly,
+        segments: [MeetingSegment(source: .you, offset: 1, text: "synthetic switch words")],
+        stretches: [MeetingStretch(start: 0, sources: [.you], end: 5, ended: .finished)], state: .finished)
+    let switchFile = switchStore.directory.appendingPathComponent("\(switchMeeting.id.uuidString).json")
+    let switchNoFolder = finished { await switchWriter.setExcludedFromBackup(false) } == true && !FileManager.default.fileExists(atPath: switchBase.path)
+    let switchCreatedIncluded = finished { await switchWriter.write(switchMeeting, revision: 1) } == MeetingCheckpointWriter.Outcome.saved && inBackups(switchStore.directory) && inBackups(switchFile)
+    let switchExcluded = finished { await switchWriter.setExcludedFromBackup(true) } == true && leftOutOfBackups(switchStore.directory)
+        && finished { await switchWriter.write(switchMeeting, revision: 2) } == MeetingCheckpointWriter.Outcome.saved && leftOutOfBackups(switchStore.directory)
+    try markOwn(switchFile)
+    let switchIncludedAgain = finished { await switchWriter.setExcludedFromBackup(false) } == true && inBackups(switchStore.directory) && inBackups(switchFile)
+    // The other way: built to include, switched off before the first save, so the folder is created out of backups.
+    let laterBase = meetingsBase.appendingPathComponent("SwitchLater", isDirectory: true)
+    let laterWriter = MeetingCheckpointWriter(store: MeetingStore(meetingsIn: laterBase, excludedFromBackup: false))
+    let switchLaterExcluded = finished { await laterWriter.setExcludedFromBackup(true) } == true && !FileManager.default.fileExists(atPath: laterBase.path)
+        && finished { await laterWriter.write(switchMeeting, revision: 1) } == MeetingCheckpointWriter.Outcome.saved && leftOutOfBackups(MeetingStore(meetingsIn: laterBase).directory)
+    // A live controller passes the choice to its writer; it shows a saved meeting and writes it with Try again, starting nothing.
+    let controllerBase = meetingsBase.appendingPathComponent("SwitchController", isDirectory: true)
+    let controllerStore = MeetingStore(meetingsIn: controllerBase)
+    let switchHost = fixture("ready")
+    let switchController = MeetingController(speech: LocalSpeech(), host: switchHost, store: controllerStore, sources: { _ in [] })
+    let switchControllerPassed = finished { await switchController.setExcludedFromBackup(false) } == true && !FileManager.default.fileExists(atPath: controllerBase.path)
+        && switchController.show(switchMeeting) && finished { await switchController.tryAgain() } == true
+        && inBackups(controllerStore.directory) && !switchController.isOpen && switchController.phase == .finished
+        && finished { await switchController.setExcludedFromBackup(true) } == true && leftOutOfBackups(controllerStore.directory)
+    let meetingBackupsSwitchPassed = backupsOffByDefault && backupsTurnedOn && !backupsShown.meetingBackups && !backupsHidden.meetingBackups
+        && switchNoFolder && switchCreatedIncluded && switchExcluded && switchIncludedAgain && switchLaterExcluded && switchControllerPassed
+        && !FileManager.default.fileExists(atPath: unusedMeetings.path)
+    // At launch the stored choice reaches an existing folder only: none is created; a folder a crash left without its
+    // exclusion gets it; including clears it from the folder and its files; hourly pruning leaves the choice alone.
+    let launchBase = meetingsBase.appendingPathComponent("Launch", isDirectory: true)
+    let launchStore = MeetingStore(meetingsIn: launchBase)
+    let launchFile = launchStore.directory.appendingPathComponent(switchFile.lastPathComponent)
+    let launchAbsent = MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, excludedFromBackup: false, now: upkeepNow) == nil
+        && MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, now: upkeepNow) == nil && !FileManager.default.fileExists(atPath: launchBase.path)
+    // As after a crash between creating the folder and excluding it.
+    try MeetingStore(directory: launchStore.directory, excludedFromBackup: false).save(switchMeeting)
+    let launchCrashLeftIncluded = inBackups(launchStore.directory)
+    let launchExcluded = MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, now: upkeepNow) == MeetingUpkeep.Result(saved: 1)
+        && leftOutOfBackups(launchStore.directory)
+    let launchPruneLeavesChoice = MeetingUpkeep.prune(base: launchBase, retention: .untilDeleted, excludedFromBackup: false, now: upkeepNow, keeping: [])
+        == MeetingUpkeep.Result(saved: 1) && leftOutOfBackups(launchStore.directory)
+    try markOwn(launchFile)
+    let launchIncluded = MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, excludedFromBackup: false, now: upkeepNow) == MeetingUpkeep.Result(saved: 1)
+        && inBackups(launchStore.directory) && inBackups(launchFile)
+    // A file that can't be changed (user-immutable here) is reported, and the rest of upkeep still runs.
+    try markOwn(launchFile)
+    try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: launchFile.path)
+    let launchFailure = MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, excludedFromBackup: false, now: upkeepNow)
+    try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: launchFile.path)
+    let launchFailureReported = launchFailure == MeetingUpkeep.Result(saved: 1, backupFailed: true) && inBackups(launchStore.directory)
+    let meetingBackupLaunchPassed = launchAbsent && launchCrashLeftIncluded && launchExcluded && launchPruneLeavesChoice && launchIncluded && launchFailureReported
+        && MeetingUpkeep.atLaunch(base: launchBase, retention: .untilDeleted, now: upkeepNow) == MeetingUpkeep.Result(saved: 1) && leftOutOfBackups(launchStore.directory)
+    // Retention changes only by a choice in Settings → Meetings: never with the space hidden, never by showing the section.
+    // Its confirmation counts expired meetings, leaving out the shown one, as pruning does.
+    let hiddenRetention = fixture("ready")
+    hiddenRetention.chooseMeetingRetention(.days30)
+    let retentionModel = fixture("settings-meetings")
+    let retentionNavigation = AppNavigation()
+    _ = retentionNavigation.navigate(to: .settings, model: retentionModel, blocked: false, confirmPracticeExit: { false })
+    retentionModel.settingsSection = "Meetings"
+    hostWindow(retentionModel, retentionNavigation)
+    let retentionShownUnchanged = retentionModel.meetingRetention == .untilDeleted && !retentionModel.meetingBackups
+    let retentionNow = Date(timeIntervalSince1970: 1_800_000_000 + 27 * 86_400)
+    let expiringCounts = [DocumentRetention.days30, .days90, .days365, .untilDeleted].map { retention in
+        finished { await retentionModel.meetingsExpiring(under: retention, now: retentionNow) }
+    }
+    let shownKept = fixture("meeting-finished")
+    let shownKeptCount = finished { await shownKept.meetingsExpiring(under: .days30, now: retentionNow.addingTimeInterval(30 * 86_400)) }
+    retentionModel.chooseMeetingRetention(.days90)
+    let meetingRetentionChoicePassed = hiddenRetention.meetingRetention == .untilDeleted && retentionShownUnchanged
+        && expiringCounts == [2, 0, 0, 0] && shownKeptCount == 3 && retentionModel.meetingRetention == .days90 && retentionModel.meetingLibrary.count == 4
+        && finished { await hiddenRetention.meetingsExpiring(under: .days30, now: retentionNow) } == 0
+        && !FileManager.default.fileExists(atPath: unusedMeetings.path)
+        && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == meetingStartsBeforeSettings
+    // Showing another meeting writes a pending notes edit first. If that write fails, the meeting stays shown as not
+    // saved; its Try again clears the refusal, as showing another meeting clears a refused delete's.
+    let meetingStartsBeforeSwitch = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    let pendingStore = MeetingStore(meetingsIn: meetingsBase.appendingPathComponent("Pending", isDirectory: true))
+    let pendingController = MeetingController(speech: LocalSpeech(), host: fixture("ready"), store: pendingStore, sources: { _ in [] })
+    func pendingMeeting(_ title: String) -> Meeting {
+        Meeting(title: title, created: Date(timeIntervalSince1970: 1_800_000_000), appName: Meeting.microphoneOnly,
+                segments: [MeetingSegment(source: .you, offset: 1, text: "synthetic pending words")],
+                stretches: [MeetingStretch(start: 0, sources: [.you], end: 5, ended: .finished)], state: .finished)
+    }
+    let pendingA = pendingMeeting("Synthetic A"), pendingB = pendingMeeting("Synthetic B")
+    func pendingOnDisk(_ id: UUID) -> Meeting? { pendingStore.loadAll(sweepingStaging: false).documents.first { $0.id == id } }
+    func lockPendingFolder(_ locked: Bool) { try? FileManager.default.setAttributes([.immutable: locked], ofItemAtPath: pendingStore.directory.path) }
+    defer { lockPendingFolder(false) }
+    let pendingSaved = pendingController.show(pendingA) && finished { await pendingController.tryAgain() } == true
+    pendingController.setNotes("synthetic notes written before the switch")
+    let pendingWritten = pendingController.show(pendingB) && pendingController.meeting?.id == pendingB.id
+        && pendingOnDisk(pendingA.id)?.notes == "synthetic notes written before the switch"
+    let pendingShownAgain = pendingOnDisk(pendingA.id).map(pendingController.show) == true
+    pendingController.setNotes("synthetic notes the folder refuses")
+    lockPendingFolder(true)
+    let pendingKept = !pendingController.show(pendingB) && pendingController.meeting?.id == pendingA.id && pendingController.notSaved
+        && pendingController.refusal == MeetingController.notSavedMessage && pendingController.meeting?.notes == "synthetic notes the folder refuses"
+    lockPendingFolder(false)
+    let pendingRetried = finished { await pendingController.tryAgain() } == true && !pendingController.notSaved && pendingController.refusal == nil
+        && pendingOnDisk(pendingA.id)?.notes == "synthetic notes the folder refuses"
+    lockPendingFolder(true)
+    let pendingDeleteRefused = finished { await pendingController.delete() } == false && pendingController.refusal == MeetingController.notDeletedMessage
+    lockPendingFolder(false)
+    let pendingRefusalCleared = pendingController.show(pendingB) && pendingController.refusal == nil && pendingOnDisk(pendingA.id) != nil
+    // A lock or user switch with no meeting open starts nothing, yet clears a checked acknowledgment; other reasons don't.
+    let epochBefore = pendingController.acknowledgmentEpoch
+    pendingController.boundary(.lockOrSleep); pendingController.boundary(.userSwitched); pendingController.boundary(.pauseButton)
+    let epochPreview = MeetingController(preview: true)
+    epochPreview.boundary(.lockOrSleep); epochPreview.callEnded()
+    let meetingAcknowledgmentClearedByBoundaryPassed = pendingController.acknowledgmentEpoch == epochBefore + 2 && pendingController.phase == .finished
+        && !pendingController.isOpen && epochPreview.acknowledgmentEpoch == 2 && epochPreview.phase == .idle
+        && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == meetingStartsBeforeSwitch
+    let meetingSwitchSavesPendingEditFirstPassed = pendingSaved && pendingWritten && pendingShownAgain && pendingKept && pendingRetried
+        && pendingDeleteRefused && pendingRefusalCleared && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == meetingStartsBeforeSwitch
+    // Continue includes Zoom's sound only for a meeting that already did, so a microphone-only meeting's labels stay true.
+    let continuing = fixture("meetings-library")
+    continuing.includeZoomSound = true
+    let continueMicrophoneOnly = continuing.openMeeting(MeetingPreviews.microphoneOnly.id) && continuing.meetingContinueApp == nil
+    let continueZoom = continuing.openMeeting(MeetingPreviews.finished.id) && continuing.meetingContinueApp == (continuing.meetingAppSoundSupported ? .zoom : nil)
+    continuing.includeZoomSound = false
+    let meetingContinueKeepsMicrophoneOnlyPassed = continueMicrophoneOnly && continueZoom && continuing.meetingContinueApp == nil
+    // A meeting held in memory only keeps setup's Start and File → New Meeting… unavailable, with its reason.
+    let heldModel = fixture("meeting-setup-not-saved")
+    let heldNavigation = AppNavigation()
+    _ = heldNavigation.navigate(to: .meetings, model: heldModel, blocked: false, confirmPracticeExit: { false })
+    hostWindow(heldModel, heldNavigation)
+    let meetingHeldMeetingBlocksSetupWithReasonPassed = heldModel.meetingsRoute == .setup && heldModel.meetingHeldMessage == MeetingController.notSavedMessage
+        && MeetingAcknowledgment.blocker(acknowledged: true, refusal: heldModel.meetingHeldMessage ?? heldModel.meetingStartBlocker) == MeetingController.notSavedMessage
+        && AppDelegate.meetingMenuState(.newMeeting, model: heldModel, page: .meetings) == .init(title: "New Meeting…", enabled: false, reason: MeetingController.notSavedMessage)
+        && fixture("meeting-finished").meetingHeldMessage == nil && fixture("meeting-setup").meetingHeldMessage == nil
+    // The backup wording follows what is known: never included, included, included before, or the choice not applied.
+    let turnedOff = fixture("settings-meetings")
+    turnedOff.setMeetingBackups(true); turnedOff.setMeetingBackups(false)
+    let meetingBackupWordingFollowsChoicePassed = fixture("settings-meetings").meetingBackupStatus == .excluded
+        && fixture("settings-meetings-backups").meetingBackupStatus == .included
+        && fixture("settings-meetings-backups-off").meetingBackupStatus == .excludedAfterIncluded
+        && fixture("settings-privacy-saved-meetings-backups-off").meetingBackupStatus == .excludedAfterIncluded
+        && fixture("settings-privacy-saved-meetings-backup-failed").meetingBackupStatus == .unconfirmed
+        && fixture("settings-privacy-saved-meetings").meetingBackupStatus == .excluded && turnedOff.meetingBackupStatus == .excludedAfterIncluded
+        && !AppModel.meetingBackupsWereIncluded(nil) && !AppModel.meetingBackupsWereIncluded(true) && AppModel.meetingBackupsWereIncluded(false)
+        && MeetingWords.emptyLibrary(.excluded).contains("kept out of Time Machine backups") && MeetingWords.emptyLibrary(.included).contains("its Time Machine backups")
+        && !MeetingWords.emptyLibrary(.unconfirmed).contains("backups")
+    // What VoiceOver gets from the meeting screen: each turn, live row, chip and Fixed tag is static text whose value
+    // carries its words, state or count; the title stays a text field; the Zoom switch has a name. Checked last, as it
+    // turns on the accessibility tree for this process.
+    let meetingTranscriptExposesWordsToVoiceOverPassed = meetingAccessibilityPassed(fixture)
+    let meetingFollowupsPassed = meetingSwitchSavesPendingEditFirstPassed && meetingAcknowledgmentClearedByBoundaryPassed && meetingContinueKeepsMicrophoneOnlyPassed
+        && meetingHeldMeetingBlocksSetupWithReasonPassed && meetingBackupWordingFollowsChoicePassed && meetingTranscriptExposesWordsToVoiceOverPassed
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
@@ -788,6 +1158,25 @@ func nativeChecks(to output: URL) throws {
         "meetingsDefaultOffLeavesStatesUnchangedPassed": meetingsDefaultOffPassed,
         "meetingUpkeepExistingFolderOnlyPassed": meetingUpkeepPassed,
         "meetingsBackupChoicePassed": meetingsBackupChoicePassed,
+        "meetingsSpaceHiddenByDefaultPassed": meetingsSpaceHiddenPassed,
+        "meetingStartNeedsAcknowledgmentWithReasonPassed": meetingStartNeedsAcknowledgmentPassed,
+        "meetingNavigationNeverStartsCapturePassed": navigationNeverCapturesPassed,
+        "meetingHomeHasNoStopOrCancelPassed": meetingHomePassed,
+        "meetingDictionaryFixesShownWithOriginalOnTogglePassed": meetingDictionaryFixesPassed,
+        "meetingSearchFindsEitherSpellingPassed": meetingSearchEitherSpellingPassed && backgroundSearchPassed,
+        "meetingCopyNoticeOnlyToItsBoardPassed": meetingCopyNoticePassed,
+        "meetingSearchSyntheticTiming": meetingSearchTiming,
+        "meetingSettingsAndMenuHiddenByDefaultPassed": meetingSettingsHiddenPassed,
+        "meetingMenuItemsFollowRefusalOrderPassed": meetingMenuStatesPassed,
+        "meetingBackupsOffByDefaultSwitchReachesLaterFolderPassed": meetingBackupsSwitchPassed,
+        "meetingBackupChoiceAppliedAtLaunchOnlyToExistingFolderPassed": meetingBackupLaunchPassed,
+        "meetingRetentionWrittenOnlyByChoicePassed": meetingRetentionChoicePassed,
+        "meetingSwitchSavesPendingEditFirstPassed": meetingSwitchSavesPendingEditFirstPassed,
+        "meetingAcknowledgmentClearedByBoundaryPassed": meetingAcknowledgmentClearedByBoundaryPassed,
+        "meetingContinueKeepsMicrophoneOnlyPassed": meetingContinueKeepsMicrophoneOnlyPassed,
+        "meetingHeldMeetingBlocksSetupWithReasonPassed": meetingHeldMeetingBlocksSetupWithReasonPassed,
+        "meetingBackupWordingFollowsChoicePassed": meetingBackupWordingFollowsChoicePassed,
+        "meetingTranscriptExposesWordsToVoiceOverPassed": meetingTranscriptExposesWordsToVoiceOverPassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -797,9 +1186,17 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"],
-        "meetingsNotTested": ["a meeting started in the app (this build has no path that starts one)", "Finish and Quit with terminateLater and the 10-second watchdog",
+        "meetingsNotTested": ["a meeting started, paused, resumed, finished, continued or discarded from the Meetings space in the running app",
+            "keyboard-only and VoiceOver passes over the library, setup and meeting screen, including rotors, Read latest and the Fixed tag's action",
+            "whether VoiceOver speaks both the label and the value of the static-text turns, live rows, chips and Fixed tag (the tree is checked, not speech)",
+            "the not-hearing and hearing-again announcements on a real call",
+            "Export through the save panel", "auto-scroll and Jump to latest while words arrive", "the library read from the real folder",
+            "deleting a meeting from the library or its screen in the running app", "the File menu's Meeting items and their shortcuts in the running app",
+            "Settings → Meetings in the running app: the retention confirmation and pruning on the real folder, and the backup switch on the real folder",
+            "Time Machine honoring the meetings folder's exclusion, or its inclusion after the switch is turned on, in a real backup",
+            "Finish and Quit with terminateLater and the 10-second watchdog",
             "the save-failure quit alert", "logout, restart or shutdown during a meeting", "real lock, sleep or user switch during a meeting",
             "the pause announcement after unlock, wake or a user switch", "microphone change routing during a meeting", "the status menu during a meeting",
             "the meeting phase observer, its message reset and the meeting error codes in a running app", "upkeep and hourly pruning on the real folder at launch",
@@ -808,5 +1205,72 @@ func nativeChecks(to output: URL) throws {
             "a logout canceled after Within finished a meeting", "a second quit from the Dock or another app while Finish and Quit saves",
             "the Quit items while Finish and Quit saves", "the unlock announcement after a lock during a rollover"]]
     try writeReport(report, to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+}
+
+/// One element of the accessibility tree as VoiceOver receives it.
+private struct AccessibilityNode {
+    let role: String, label: String, value: String
+    let actions: [String]
+}
+
+/// The meeting screen's tree, built the way VoiceOver asks for it: the window is hosted with the accessibility tree
+/// turned on for this process, then walked. Synthetic preview meetings only; nothing is spoken, read or written.
+@MainActor
+private func meetingAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool {
+    // As an assistive app asks for it; the legacy setter is reached by name. Process-local; it prompts for nothing.
+    func assistive(_ on: Bool) {
+        for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+            _ = NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on), with: attribute as NSString)
+        }
+    }
+    assistive(true)
+    defer { assistive(false) }
+    func walk(_ node: Any, _ depth: Int, _ out: inout [AccessibilityNode]) {
+        guard depth < 40, let element = node as? NSObject else { return }
+        func get(_ name: String) -> Any? {
+            let selector = NSSelectorFromString(name)
+            return element.responds(to: selector) ? element.perform(selector)?.takeUnretainedValue() : nil
+        }
+        out.append(AccessibilityNode(role: get("accessibilityRole") as? String ?? "", label: get("accessibilityLabel") as? String ?? "",
+                                     value: get("accessibilityValue").map { "\($0)" } ?? "",
+                                     actions: (get("accessibilityCustomActions") as? [NSAccessibilityCustomAction])?.map(\.name) ?? []))
+        for child in get("accessibilityChildren") as? [Any] ?? [] { walk(child, depth + 1, &out) }
+    }
+    func tree(_ state: String) -> [AccessibilityNode] {
+        let model = fixture(state)
+        let navigation = AppNavigation()
+        _ = navigation.navigate(to: .meetings, model: model, blocked: false, confirmPracticeExit: { false })
+        let host = NSHostingView(rootView: AppWindowView(model: model, navigation: navigation, togglePractice: { _ in }))
+        host.frame = NSRect(x: 0, y: 0, width: 900, height: state.hasPrefix("meeting-setup") ? 1000 : 700)
+        let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.contentView = host
+        defer { window.contentView = nil; window.orderOut(nil) }
+        var nodes: [AccessibilityNode] = []
+        // SwiftUI fills the tree in over a few passes once it is asked for.
+        for _ in 0..<5 {
+            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+            host.needsLayout = true; host.layoutSubtreeIfNeeded()
+            nodes = []; walk(host, 0, &nodes)
+        }
+        return nodes
+    }
+    func node(_ nodes: [AccessibilityNode], _ label: String) -> AccessibilityNode? { nodes.first { $0.label == label } }
+    let staticText = NSAccessibility.Role.staticText.rawValue
+    let read = "Read original transcription"
+    let fixes = tree("meeting-dictionary-fixes")
+    let fixedTurn = node(fixes, "Others, 8 seconds"), plainTurn = node(fixes, "Others, 33 seconds"), tag = node(fixes, "Fixed")
+    let fixesPassed = fixedTurn?.role == staticText && fixedTurn?.value == "Can you open the Jira board so Siobhan can see the sprint?"
+        && fixedTurn?.actions.contains(read) == true
+        && plainTurn?.role == staticText && plainTurn?.value == "Thanks. Anything blocking you this week?" && plainTurn?.actions.isEmpty == true
+        && tag?.role == staticText && tag?.value == MeetingWords.fixes(2) && tag?.actions.contains(read) == true
+        && node(fixes, "Meeting title")?.role == NSAccessibility.Role.textField.rawValue
+    let recording = tree("meeting-recording")
+    let others = node(recording, "Others, Zoom"), live = node(recording, "Others, still being transcribed")
+    let recordingPassed = others?.role == staticText && others?.value == "Live" && live?.role == staticText
+        && live?.value == "I think we could move the shortcut choice to the end and"
+        && recording.contains { $0.role == staticText && $0.label.hasPrefix("You, ") && $0.value == "Live" }
+    let setup = tree("meeting-setup-computer-audio-intro")
+    let setupPassed = setup.contains { $0.role == NSAccessibility.Role.checkBox.rawValue && $0.label == "Include Zoom’s sound (the other people)" }
+    return fixesPassed && recordingPassed && setupPassed
 }

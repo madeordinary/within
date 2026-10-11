@@ -32,7 +32,13 @@ func renderPreviews(to directory: URL) throws {
                   "recovery-dictionary", "inserted-dictionary", "practice-dictionary",
                   "dictionary", "dictionary-empty", "dictionary-unreadable", "dictionary-recording", "dictation-dictionary-unreadable",
                   "home-meeting-recording", "home-meeting-paused", "home-meeting-refused", "home-meeting-finishing", "notes-meeting",
-                  "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable"] {
+                  "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable",
+                  "settings-privacy-saved-meetings-backups", "settings-meetings", "settings-meetings-backups",
+                  "meetings-empty", "meetings-library", "meeting-setup", "meeting-setup-computer-audio-intro", "meeting-mic-only",
+                  "meeting-recording", "meeting-recording-720", "meeting-recording-900", "meeting-paused", "meeting-resume-acknowledge",
+                  "meeting-call-ended", "meeting-recovered", "meeting-finished", "meeting-dictionary-fixes", "home-during-meeting",
+                  "meetings-library-720", "meeting-finished-720", "meeting-setup-not-saved", "settings-meetings-backups-off",
+                  "settings-privacy-saved-meetings-backups-off", "settings-privacy-saved-meetings-backup-failed"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
         if state == "practice-empty" || state == "history" {
@@ -55,10 +61,35 @@ func renderPreviews(to directory: URL) throws {
             case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: PillView.height), dark: dark)
             case "practice", "practice-empty", "practice-empty-toggle", "practice-dictionary": try render(name, view: shell(model, .home, practice: true), size: NSSize(width: 900, height: 900), dark: dark)
             case "notes", "note-recording", "notes-empty", "notes-meeting": try render(name, view: shell(model, .notes), size: shellSize, dark: dark)
-            case "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable":
+            case "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable", "settings-privacy-saved-meetings-backups",
+                 "settings-privacy-saved-meetings-backups-off", "settings-privacy-saved-meetings-backup-failed":
                 // The developer preview's saved meetings while the space is hidden: the only meeting line in Settings.
                 model.settingsSection = "Privacy"
                 try render(name, view: shell(model, .settings), size: shellSize, dark: dark)
+            case "settings-meetings", "settings-meetings-backups", "settings-meetings-backups-off":
+                model.settingsSection = "Meetings"
+                try render(name, view: shell(model, .settings), size: NSSize(width: 900, height: 880), dark: dark)
+                if state == "settings-meetings" {
+                    // The copy the developer default adds to other pages.
+                    for section in ["Audio", "Privacy"] {
+                        model.settingsSection = section
+                        try render("within-settings-\(section.lowercased())-with-meetings\(dark ? "-dark" : "")", view: shell(model, .settings), size: shellSize, dark: dark)
+                    }
+                    try render("within-help-with-meetings\(dark ? "-dark" : "")", view: shell(model, .help), size: NSSize(width: 900, height: 1000), dark: dark)
+                }
+            case "meeting-setup", "meeting-setup-computer-audio-intro", "meeting-mic-only", "meeting-setup-not-saved":
+                try render(name, view: shell(model, .meetings), size: NSSize(width: 900, height: 1000), dark: dark)
+            case "meeting-recording": try render(name, view: shell(model, .meetings), size: NSSize(width: 1100, height: 760), dark: dark)
+            // The minimum window, where the transcript and notes become tabs; "meeting-recording-900" is the default window.
+            case "meeting-recording-720", "meetings-library-720", "meeting-finished-720":
+                try render(name, view: shell(model, .meetings), size: NSSize(width: 720, height: 560), dark: dark)
+            case _ where state.hasPrefix("meeting"):
+                try render(name, view: shell(model, .meetings), size: shellSize, dark: dark)
+                if state == "meeting-dictionary-fixes" {
+                    model.setShowingOriginalTranscription(true)
+                    try render("within-meeting-dictionary-fixes-original\(dark ? "-dark" : "")", view: shell(model, .meetings), size: shellSize, dark: dark)
+                    model.setShowingOriginalTranscription(false)
+                }
             default: try render(name, view: shell(model, .home), size: shellSize, dark: dark)
             }
             if state == "update-available" {

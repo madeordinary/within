@@ -31,12 +31,24 @@ typealias MeetingSourceFactory = @MainActor (_ app: MeetingApp?) -> [MeetingAudi
 /// snapshots are dropped, and its file is removed only after every earlier write has landed.
 final class MeetingCheckpointWriter: @unchecked Sendable {
     enum Outcome: Equatable { case saved, superseded, failed }
-    private let store: MeetingStore
+    /// Touched on `queue` only, so a backup choice reaches every save sent after it.
+    private var store: MeetingStore
     private let queue = DispatchQueue(label: "com.madeordinary.Within.meeting-checkpoints", qos: .utility)
     /// Touched on `queue` only, so a delete and a late snapshot are decided in the order they were sent.
     private var gate = MeetingCheckpointGate()
 
     init(store: MeetingStore) { self.store = store }
+
+    /// The backup choice, after every save already sent: a folder that exists takes it now, and a later save that
+    /// creates the folder creates it with this choice. False when the existing folder couldn't be changed.
+    func setExcludedFromBackup(_ excluded: Bool) async -> Bool {
+        await withCheckedContinuation { continuation in
+            queue.async {
+                self.store = MeetingStore(directory: self.store.directory, excludedFromBackup: excluded)
+                continuation.resume(returning: (try? self.store.applyBackupChoice()) != nil)
+            }
+        }
+    }
 
     func write(_ meeting: Meeting, revision: Int) async -> Outcome {
         await withCheckedContinuation { continuation in
@@ -85,8 +97,12 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     @Published private(set) var levels: [MeetingSource: Float] = [:]
     /// Meeting-relative seconds: now while capturing, else where the last stretch ended.
     @Published private(set) var elapsed: TimeInterval = 0
-    /// Why the last start, resume or capture request was refused; cleared by the next one accepted.
+    /// Why the last start, resume or capture request was refused; cleared by the next one accepted, and once the meeting
+    /// it concerned is finished, saved after a failed save, deleted or no longer shown.
     @Published private(set) var refusal: String?
+    /// Bumped by every lock, sleep, user switch or call end, open meeting or not: an acknowledgment checked before it
+    /// no longer counts, since the call may have changed.
+    @Published private(set) var acknowledgmentEpoch = 0
     /// The last save failed: the meeting is in memory only until Try again or the next checkpoint succeeds.
     @Published private(set) var notSaved = false
     /// A non-blocking notice, such as the rollover past three hours. Kept until the next pause, resume, finish,
@@ -215,6 +231,13 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
 
     func dismissNotice() { notice = nil }
 
+    /// The user's backup choice for the meetings folder, through the writer so it follows every save already sent
+    /// and reaches a folder created later. A preview has no folder.
+    func setExcludedFromBackup(_ excluded: Bool) async -> Bool {
+        guard let writer else { return true }
+        return await writer.setExcludedFromBackup(excluded)
+    }
+
     /// Stops capture, drains and saves. True only once the finished record is on disk (or nothing was kept).
     func finish() async -> Bool { await end(.finish) }
 
@@ -281,10 +304,14 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     /// Lock, sleep or a user switch.
     func boundary(_ reason: MeetingStretchEnd) {
         guard reason == .lockOrSleep || reason == .userSwitched else { return }
+        acknowledgmentEpoch += 1
         send(.boundary(reason))
     }
 
-    func callEnded() { send(.callEnded) }
+    func callEnded() {
+        acknowledgmentEpoch += 1
+        send(.callEnded)
+    }
 
     /// The capture engine's input changed while You was live. No automatic device switch.
     func microphoneChanged() {
@@ -340,10 +367,12 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
 
     /// Previews only: a synthetic meeting shown in a phase. Nothing is written or started.
     func configurePreview(_ meeting: Meeting?, phase: MeetingLifecycle.Phase, provisional: [MeetingSource: String] = [:],
-                          sourceStates: [MeetingSource: MeetingSourceState] = [:], elapsed: TimeInterval = 0, needsAcknowledgment: Bool = false) {
+                          sourceStates: [MeetingSource: MeetingSourceState] = [:], elapsed: TimeInterval = 0, needsAcknowledgment: Bool = false,
+                          notSaved: Bool = false) {
         guard preview else { return }
         self.meeting = meeting; self.phase = phase; self.provisional = provisional
         self.sourceStates = sourceStates; self.elapsed = elapsed; previewNeedsAcknowledgment = needsAcknowledgment
+        self.notSaved = notSaved
     }
 
     // MARK: Lifecycle
@@ -353,9 +382,16 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     private var quiescent: Bool { !performing && pending.isEmpty && run == nil }
 
     /// The shown record is replaced only when it isn't held in memory alone: a failed save or a failed
-    /// deletion keeps it until Try again.
+    /// deletion keeps it until Try again. An edit still waiting for its save, or still being written, is written
+    /// now, once; if that fails, the meeting stays shown as not saved.
     private func mayReplaceShown() -> Bool {
         if deletionPending { refuse(Self.notDeletedMessage); return false }
+        if dirty || saving > 0, let writer, let current = meeting {
+            cancelSaves()
+            revision += 1
+            if writer.writeNow(current, revision: revision) == .saved { checkpointsWritten += 1; notSaved = false }
+            else { checkpointFailures += 1; notSaved = true; markDirty() }
+        }
         if notSaved { refuse(Self.notSavedMessage); return false }
         return true
     }
@@ -374,7 +410,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         phase = lifecycle.phase
         builder = MeetingTranscriptBuilder(segments: meeting?.segments ?? [])
         clock = MeetingClock()
-        notSaved = false; deletionPending = false; notice = nil; provisional = [:]; levels = [:]
+        notSaved = false; deletionPending = false; notice = nil; refusal = nil; provisional = [:]; levels = [:]
         elapsed = meeting?.stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0
         self.app = finished ? nil : app
         replaceSources(finished ? [] : makeSources(app))
@@ -444,7 +480,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
             changed()
         case .markFinished:
             meeting?.state = .finished
-            provisional = [:]
+            provisional = [:]; refusal = nil
             changed()
             if let speech { Task { await speech.releaseDedicatedModels() } }
         case .refused(.acknowledgmentNeeded): refuse(Self.acknowledgmentMessage)
@@ -690,10 +726,14 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
                         self.send(.health(reason, generation: run.beginGeneration)); return
                     case .rollover:
                         self.send(.rollover(generation: run.beginGeneration)); return
+                    // Said once as the state changes; the monitor reports only changes.
                     case .quiet(let source):
                         self.sourceStates[source] = .quiet
+                        let name = self.app?.name ?? "the meeting app"
+                        host.announce("Not hearing \(name). " + MeetingWords.notHearing(name))
                     case .heard(let source):
                         self.sourceStates[source] = .live
+                        host.announce("Hearing \(self.app?.name ?? "the meeting app") again.")
                     }
                 }
             }
@@ -789,6 +829,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         case .saved:
             checkpointsWritten += 1
             notSaved = false
+            if refusal == Self.notSavedMessage { refusal = nil }
         case .failed:
             checkpointFailures += 1
             if !notSaved { host?.announce(Self.notSavedMessage) }
@@ -826,7 +867,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         if meeting?.id == id {
             meeting = nil
             builder = MeetingTranscriptBuilder()
-            notSaved = false; deletionPending = false; provisional = [:]
+            notSaved = false; deletionPending = false; refusal = nil; provisional = [:]
         }
         return true
     }

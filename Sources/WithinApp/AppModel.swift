@@ -82,7 +82,7 @@ final class AppModel: ObservableObject {
     var lastChangeRowHasFocus = false
     private var lastChangeExpiry: Task<Void, Never>?
     /// Meetings, behind the hidden developer default `showMeetingsSpace`, read once at launch. Off: an inert
-    /// controller and no store. This build has no path that starts a meeting either way.
+    /// controller, no store and no Meetings space; only its own Start, Continue and Resume ever start capture.
     @Published private(set) var showsMeetingsSpace: Bool
     /// Views observe it directly; a nested object doesn't republish through this one.
     private(set) var meetings = MeetingController(preview: true)
@@ -91,10 +91,44 @@ final class AppModel: ObservableObject {
     /// That folder exists but couldn't be listed, so the count can't be trusted.
     @Published private(set) var meetingsUnlistable = false
     @Published private(set) var meetingsMessage = ""
-    /// The stored `meetingRetention`; unset keeps meetings until deleted. Nothing in this build writes it.
-    private(set) var meetingRetention: DocumentRetention
+    /// The stored `meetingRetention`; unset keeps meetings until deleted. Written only by a choice in Settings → Meetings.
+    @Published private(set) var meetingRetention: DocumentRetention
+    /// The stored `meetingBackups`: meetings stay out of Time Machine unless the user turns this on (absent is off).
+    /// Applied to the folder at every launch, whatever the developer default says.
+    @Published private(set) var meetingBackups: Bool
+    /// The switch was on before it was turned off, so Time Machine may still hold copies. Only the switch writes
+    /// `meetingBackups`, and its first write is `true`, so a stored `false` means exactly this.
+    @Published private(set) var meetingBackupsWereIncluded: Bool
+    /// Why the backup choice couldn't be applied to the meetings folder; empty once it was.
+    @Published private(set) var meetingBackupMessage = ""
+    private var meetingBackupApply: Task<Void, Never>?
     /// A quit, logout, restart or shutdown saving the meeting; one at a time.
     private var meetingQuit: Task<Bool, Never>?
+    /// Where the Meetings space is. An open meeting is always shown, whatever this says.
+    @Published var meetingsRoute = MeetingsRoute.library
+    /// Saved meetings for the library, newest first: read only while the space is visible, synthetic in previews.
+    @Published private(set) var meetingLibrary: [Meeting] = []
+    @Published private(set) var meetingLibraryUnreadable = 0
+    /// Recovered at launch and not yet opened in this run: the sidebar's "to review".
+    @Published private(set) var meetingsToReview: Set<UUID> = []
+    /// Recovered-meeting banners closed in this run.
+    @Published private(set) var closedRecoveryNotices: Set<UUID> = []
+    /// The shown meeting reads as originally transcribed instead of in your spellings; reset for each meeting.
+    @Published private(set) var showingOriginalTranscription = false
+    /// Include Zoom's sound in the next start; off at every launch, and remembered only for this run.
+    @Published var includeZoomSound = false
+    /// Why the last new meeting didn't start, shown in setup until it is left.
+    @Published private(set) var meetingSetupFailure: String?
+    /// Where focus goes next in the Meetings space; the view that can take it clears it.
+    @Published var meetingsFocusRequest: MeetingsFocus?
+    /// Including an app's sound needs macOS 14.2; a preview can say otherwise to show the microphone-only setup.
+    @Published private(set) var meetingAppSoundSupported = AppModel.appSoundAvailable
+    /// Each saved turn in your spellings, kept while its text and the dictionary stay the same.
+    let meetingSpellings = MeetingSpellingCache()
+    /// Bumped whenever the matcher may have changed.
+    private(set) var dictionaryRevision = 0
+    private var meetingsDeleted: Set<UUID> = []
+    private var meetingShownID: UUID?
     /// Update checks: `nil` means not chosen, which behaves as off. Nothing installs itself.
     @Published private(set) var automaticUpdateChecks: Bool?
     @Published private(set) var updateResult: UpdateCheckResult?
@@ -219,15 +253,19 @@ final class AppModel: ObservableObject {
         showsPersonalDictionary = dictionaryFixture || UserDefaults.standard.bool(forKey: "showPersonalDictionary")
         showsMeetingsSpace = !dictionaryFixture && UserDefaults.standard.bool(forKey: "showMeetingsSpace")
         meetingRetention = .restored(from: UserDefaults.standard.string(forKey: "meetingRetention"))
+        meetingBackups = Self.storedMeetingBackups(UserDefaults.standard.object(forKey: "meetingBackups"))
+        meetingBackupsWereIncluded = Self.meetingBackupsWereIncluded(UserDefaults.standard.object(forKey: "meetingBackups"))
         observeMeetings()
         if preview { return }
         if dictionaryFixture { openDictionary(base); return }
         // Upkeep runs whatever the default says; only use of meetings waits for it.
         meetingsBase = base
-        let upkeep = MeetingUpkeep.atLaunch(base: base, retention: meetingRetention, now: Date())
+        let upkeep = MeetingUpkeep.atLaunch(base: base, retention: meetingRetention, excludedFromBackup: !meetingBackups, now: Date())
         savedMeetingCount = upkeep?.saved ?? 0; meetingsUnlistable = upkeep?.unlistable ?? false
+        meetingsToReview = Set(upkeep?.recoveredIDs ?? [])
+        if upkeep?.backupFailed == true { meetingBackupMessage = Self.meetingBackupFailure }
         if showsMeetingsSpace {
-            meetings = MeetingController(speech: speech, host: self, store: MeetingStore(meetingsIn: base)) { [weak self] app in
+            meetings = MeetingController(speech: speech, host: self, store: meetingStore(base)) { [weak self] app in
                 guard let self else { return [] }
                 var sources: [MeetingAudioSource] = [MicrophoneSource(capture: capture) { [weak self] in self?.microphoneUID ?? "" }]
                 if let app, #available(macOS 14.2, *) { sources.append(AppAudioSource(app: app)) }
@@ -361,6 +399,8 @@ final class AppModel: ObservableObject {
         refreshPermissions()
         if !accessibilityAllowed { openSystemSettings("Privacy_Accessibility") }
     }
+    /// Privacy & Security, where macOS lists System Audio Recording; Within can't read that permission.
+    func openPrivacySettings() { if !previewMode { openSystemSettings("Privacy") } }
     private func openSystemSettings(_ page: String) {
         if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(page)") { NSWorkspace.shared.open(url) }
     }
@@ -889,6 +929,7 @@ final class AppModel: ObservableObject {
     private func refreshDictionary() {
         dictionaryIssues = DictionaryPolicy.loadIssues(dictionary)
         dictionaryMatcher = showsPersonalDictionary && canEditDictionary ? DictionaryMatcher(dictionary) : .empty
+        dictionaryRevision += 1
     }
     /// The only save path. It never writes over a file that couldn't be read or came from a newer version.
     private func persistDictionary() {
@@ -948,7 +989,7 @@ final class AppModel: ObservableObject {
     private func observeMeetings() {
         meetingObservers = [meetings.$phase.sink { [weak self] _ in self?.objectWillChange.send() }]
         guard !previewMode else { return }
-        meetingObservers.append(meetings.$phase.map { _ in () }.merge(with: meetings.$notSaved.map { _ in () })
+        meetingObservers.append(meetings.$phase.map { _ in () }.merge(with: meetings.$notSaved.map { _ in () }, meetings.$meeting.map { $0?.id }.removeDuplicates().map { _ in () })
             .receive(on: DispatchQueue.main).sink { [weak self] in MainActor.assumeIsolated { self?.meetingStateChanged() } })
     }
     private static let meetingCaptureErrors: Set<MeetingStretchEnd> = [.speechError, .processingFellBehind, .microphoneStalled, .computerAudioStalled]
@@ -965,29 +1006,218 @@ final class AppModel: ObservableObject {
         }
         // An unload asked for while a stretch was starting, which then never claimed the session, runs now.
         if unloadAfterSession, !meetings.isCapturing, !workerBusy { requestUnload() }
+        // The space shows an open meeting; one that ended without a record goes back to setup with the reason, or to the library.
+        if open { meetingsRoute = .meeting }
+        else if meetingsRoute == .meeting, meetings.meeting == nil, !meetings.deletionPending {
+            meetingSetupFailure = meetings.startFailure.map { MeetingWords.startFailure($0, appName: MeetingApp.zoom.name) }
+                ?? (meetings.refusal == MeetingController.notSavedMessage ? MeetingWords.startNotSaved : nil)
+            meetingsRoute = meetingSetupFailure == nil ? .library : .setup
+        }
+        // The controller lets go of a meeting only once its file is gone: a discard, a delete, or a start that kept nothing.
+        if meetings.meeting == nil, let shown = meetingShownID { forgetMeeting(shown) }
+        meetingShownID = meetings.meeting?.id
+        keepShownMeetingInLibrary()
         if let failure = meetings.startFailure, failure != meetingFailureSeen { lastErrorCode = "meeting_start_failed" }
         if let end = meetings.lastEnd, end != meetingEndSeen, Self.meetingCaptureErrors.contains(end) { lastErrorCode = "meeting_capture_or_inference" }
         if meetings.notSaved, !meetingSaveFailedSeen { lastErrorCode = "meeting_save_failed" }
         meetingFailureSeen = meetings.startFailure; meetingEndSeen = meetings.lastEnd; meetingSaveFailedSeen = meetings.notSaved
         notify()
     }
+    // MARK: Meetings space
+
+    static var appSoundAvailable: Bool { if #available(macOS 14.2, *) { return true } else { return false } }
+
+    /// Reads the saved meetings off the main actor, only while the space is visible and never in a preview. A crash's
+    /// staging files were swept at launch; any a save is writing now are left alone.
+    func loadMeetingLibrary() {
+        guard showsMeetingsSpace, !previewMode, let meetingsBase else { return }
+        let store = meetingStore(meetingsBase)
+        Task { [weak self] in
+            let loaded = await Task.detached(priority: .userInitiated) { store.loadAll(sweepingStaging: false) }.value
+            guard let self else { return }
+            meetingLibrary = Self.newestFirst(loaded.documents.filter { !self.meetingsDeleted.contains($0.id) })
+            meetingLibraryUnreadable = loaded.unreadable; meetingsUnlistable = loaded.unlistable
+            // "To review" counts only meetings still here, such as after retention deleted one; a folder that couldn't be listed proves nothing.
+            if !loaded.unlistable { meetingsToReview.formIntersection(meetingLibrary.map(\.id)) }
+            keepShownMeetingInLibrary()
+        }
+    }
+    private static func newestFirst(_ meetings: [Meeting]) -> [Meeting] { meetings.sorted { $0.created > $1.created } }
+    /// The controller's copy is the truth for the meeting it shows; the library keeps one for its row and search.
+    private func keepShownMeetingInLibrary() {
+        guard showsMeetingsSpace, let shown = meetings.meeting, !meetingsDeleted.contains(shown.id) else { return }
+        if let index = meetingLibrary.firstIndex(where: { $0.id == shown.id }) {
+            if meetingLibrary[index] != shown { meetingLibrary[index] = shown }
+        } else { meetingLibrary = Self.newestFirst(meetingLibrary + [shown]) }
+    }
+    private func forgetMeeting(_ id: UUID) {
+        meetingsDeleted.insert(id); meetingLibrary.removeAll { $0.id == id }
+        meetingsToReview.remove(id); closedRecoveryNotices.remove(id)
+    }
+    /// The library. While a meeting is open the space keeps showing it, so this does nothing.
+    func showAllMeetings() {
+        guard !meetings.isOpen, !meetings.deletionPending else { return }
+        keepShownMeetingInLibrary()
+        meetingSetupFailure = nil
+        meetingsFocusRequest = meetingsRoute == .meeting ? meetings.meeting.map { .row($0.id) } ?? .newMeeting : .newMeeting
+        meetingsRoute = .library
+    }
+    /// Setup for a new meeting. Nothing starts until its Start meeting.
+    func newMeeting() {
+        guard showsMeetingsSpace, !meetings.isOpen, !meetings.deletionPending else { return }
+        keepShownMeetingInLibrary()
+        meetingSetupFailure = nil
+        meetingsRoute = .setup
+    }
+    /// Shows a saved meeting; never starts anything. Refused while another is open, or one shown is held in memory only.
+    @discardableResult func openMeeting(_ id: UUID) -> Bool {
+        guard showsMeetingsSpace, !meetings.isOpen,
+              let meeting = meetings.meeting?.id == id ? meetings.meeting : meetingLibrary.first(where: { $0.id == id }) else { return false }
+        keepShownMeetingInLibrary()
+        guard meetings.show(meeting) else { return false }
+        if meetings.meeting?.id != id { return false }
+        showingOriginalTranscription = false; meetingsToReview.remove(id)
+        meetingsRoute = .meeting; meetingsFocusRequest = .title
+        return true
+    }
+    private var meetingApp: MeetingApp? { includeZoomSound && meetingAppSoundSupported ? .zoom : nil }
+    /// Setup's Start meeting: a new meeting with the sources chosen there, saved before anything starts.
+    @discardableResult func startMeeting(title: String, acknowledged: Bool) -> Bool {
+        guard showsMeetingsSpace, !meetings.isOpen else { return false }
+        keepShownMeetingInLibrary()
+        guard meetings.start(title: title, app: meetingApp, acknowledged: acknowledged) else { return false }
+        meetingSetupFailure = nil; showingOriginalTranscription = false
+        meetingsRoute = .meeting; meetingsFocusRequest = .notes
+        return true
+    }
+    /// What a Continue includes: Zoom's sound only for a meeting that already included it, since a microphone-only
+    /// meeting's labels and export say the microphone alone.
+    var meetingContinueApp: MeetingApp? { meetings.meeting?.includesAppSound == true ? meetingApp : nil }
+    /// "Continue this meeting" on the shown one, with its own acknowledgment and the sources chosen for it.
+    @discardableResult func continueMeeting(acknowledged: Bool) -> Bool {
+        guard showsMeetingsSpace, let id = meetings.meeting?.id,
+              meetings.continueMeeting(app: meetingContinueApp, acknowledged: acknowledged) else { return false }
+        meetingsToReview.remove(id); meetingsFocusRequest = .notes
+        return true
+    }
+    @discardableResult func resumeMeeting(acknowledged: Bool, microphoneOnly: Bool = false) -> Bool {
+        meetings.resume(acknowledged: acknowledged, microphoneOnly: microphoneOnly)
+    }
+    /// Stops capture, drains and saves; focus then goes to Export.
+    @discardableResult func finishMeeting() async -> Bool {
+        let finished = await meetings.finish()
+        keepShownMeetingInLibrary()
+        if finished { meetingsFocusRequest = .export }
+        return finished
+    }
+    @discardableResult func discardMeeting() async -> Bool {
+        let id = meetings.meeting?.id
+        guard await meetings.discard() else { return false }
+        if let id { forgetMeeting(id) }
+        meetingsRoute = .library; meetingsFocusRequest = .newMeeting
+        return true
+    }
+    /// Deletes a finished meeting after its confirmation: the one shown, or a library row, which is shown first.
+    @discardableResult func deleteMeeting(_ id: UUID) async -> Bool {
+        guard !meetings.isOpen else { return false }
+        if meetings.meeting?.id != id {
+            guard let meeting = meetingLibrary.first(where: { $0.id == id }), meetings.show(meeting), meetings.meeting?.id == id else { return false }
+        }
+        let rows = meetingLibrary.map(\.id)
+        guard await meetings.delete() else { return false }
+        forgetMeeting(id)
+        // The row after it, or the one before when it was last.
+        let next = rows.firstIndex(of: id).flatMap { index in rows.indices.contains(index + 1) ? rows[index + 1] : index > 0 ? rows[index - 1] : nil }
+        meetingsRoute = .library; meetingsFocusRequest = next.map { .row($0) } ?? .newMeeting
+        return true
+    }
+    /// Try again after a failed save, or after a discard or delete that couldn't remove the file.
+    func retryMeeting() async {
+        let id = meetings.meeting?.id, removing = meetings.deletionPending
+        guard await meetings.tryAgain(), removing, let id else { keepShownMeetingInLibrary(); return }
+        forgetMeeting(id)
+        meetingsRoute = .library; meetingsFocusRequest = .newMeeting
+    }
+    func closeRecoveryNotice(_ id: UUID) { closedRecoveryNotices.insert(id); meetingsFocusRequest = .firstTurn }
+    func setShowingOriginalTranscription(_ showing: Bool) {
+        guard showing != showingOriginalTranscription else { return }
+        showingOriginalTranscription = showing
+        announce(showing ? "Showing original transcription" : "Showing your spellings")
+    }
+    /// A saved turn in your spellings from the current dictionary.
+    func meetingTurn(_ segment: MeetingSegment) -> DictionaryResult {
+        meetingSpellings.turn(segment, dictionary: dictionaryMatcher, revision: dictionaryRevision)
+    }
+    /// What the meeting screen shows for a saved turn.
+    func meetingTurnText(_ segment: MeetingSegment) -> String { showingOriginalTranscription ? segment.text : meetingTurn(segment).text }
+    /// Turns the dictionary changes in the shown meeting; zero with the dictionary off or empty.
+    var meetingFixedTurns: Int {
+        guard let meeting = meetings.meeting, !dictionaryMatcher.isEmpty else { return 0 }
+        return meeting.segments.filter { meetingTurn($0).changed }.count
+    }
+    /// Library rows matching a search: title, notes, and each turn as transcribed or in your spellings.
+    func searchMeetings(_ query: String) -> [UUID] {
+        MeetingSearch.matching(meetingLibrary, query: query, dictionary: dictionaryMatcher).map(\.id)
+    }
+    /// The same search off the main actor, since a library of long meetings takes seconds to search: nil once a newer
+    /// search cancels it, checked between meetings.
+    func findMeetings(_ query: String) async -> [UUID]? {
+        guard !Task.isCancelled else { return nil }
+        let library = meetingLibrary, dictionary = dictionaryMatcher
+        let search = Task.detached(priority: .userInitiated) { () -> [UUID]? in
+            var found: [UUID] = []
+            for meeting in library {
+                if Task.isCancelled { return nil }
+                if !MeetingSearch.matching([meeting], query: query, dictionary: dictionary).isEmpty { found.append(meeting.id) }
+            }
+            return found
+        }
+        return await withTaskCancellationHandler { await search.value } onCancel: { search.cancel() }
+    }
+    /// The shown meeting as Markdown for Export: your spellings, or the original transcription when asked; never both.
+    func meetingMarkdown(useOriginalTranscription: Bool) -> String? {
+        meetings.meeting.map { MeetingExport.markdown($0, dictionary: dictionaryMatcher, useOriginalTranscription: useOriginalTranscription) }
+    }
+    /// A library row's state in words: the open meeting's, or a meeting Within stopped during.
+    func meetingBadge(_ meeting: Meeting) -> String? {
+        if meetings.isOpen, meetings.meeting?.id == meeting.id { return meetings.phase == .paused ? "Paused" : "In progress" }
+        return meeting.recovered ? "Recovered" : nil
+    }
+    /// What keeps a meeting from starting, in `meetingStartRefusal()`'s words, without refreshing anything; for views.
+    var meetingStartBlocker: String? { meetingCaptureHolder ?? meetingReadinessRefusal }
+    /// The shown meeting is held in memory only, so no other meeting starts or opens until its Try again succeeds.
+    var meetingHeldMessage: String? {
+        meetings.deletionPending ? MeetingController.notDeletedMessage : meetings.notSaved ? MeetingController.notSavedMessage : nil
+    }
+    static let meetingNotice = "I'm taking private transcribed notes of this call on my Mac."
+    /// Copy notice: the sentence goes to the clipboard only on this click and is never posted anywhere by Within.
+    @discardableResult func copyMeetingNotice(to pasteboard: NSPasteboard = .general) -> Bool {
+        pasteboard.clearContents()
+        let copied = pasteboard.setString(Self.meetingNotice, forType: .string)
+        announce(copied ? "Notice copied" : "Copy failed")
+        return copied
+    }
+
     /// Hourly, on an existing folder only. Open meetings are never expired, and the one shown, which may still be
     /// saving, is left alone.
     func pruneMeetings() {
         guard let meetingsBase else { return }
-        let upkeep = MeetingUpkeep.prune(base: meetingsBase, retention: meetingRetention, now: Date(), keeping: Set([meetings.meeting?.id].compactMap { $0 }))
+        let upkeep = MeetingUpkeep.prune(base: meetingsBase, retention: meetingRetention, excludedFromBackup: !meetingBackups, now: Date(),
+                                         keeping: Set([meetings.meeting?.id].compactMap { $0 }))
         savedMeetingCount = upkeep?.saved ?? 0; meetingsUnlistable = upkeep?.unlistable ?? false
+        // The library drops what was deleted.
+        if (upkeep?.pruned ?? 0) > 0 { loadMeetingLibrary() }
     }
     /// Counts the meeting files without reading them, as Settings → Privacy appears and after Show in Finder.
     func refreshSavedMeetings() {
         guard !previewMode, let meetingsBase else { return }
-        let count = MeetingStore(meetingsIn: meetingsBase).fileCount
+        let count = meetingStore(meetingsBase).fileCount
         savedMeetingCount = count ?? 0; meetingsUnlistable = count == nil
     }
     /// Selects the meetings folder in Finder; nothing is opened or read. A folder removed meanwhile is recounted instead.
     func showMeetingsInFinder() {
         guard !previewMode, let meetingsBase else { return }
-        let store = MeetingStore(meetingsIn: meetingsBase)
+        let store = meetingStore(meetingsBase)
         guard store.exists else { refreshSavedMeetings(); return }
         NSWorkspace.shared.activateFileViewerSelecting([store.directory])
     }
@@ -995,7 +1225,7 @@ final class AppModel: ObservableObject {
     func deleteAllMeetings() {
         guard !showsMeetingsSpace, !meetings.isOpen else { return }
         guard !previewMode, let meetingsBase else { savedMeetingCount = 0; return }
-        let store = MeetingStore(meetingsIn: meetingsBase)
+        let store = meetingStore(meetingsBase)
         do {
             if store.exists { try store.removeAll() }
             savedMeetingCount = 0; meetingsUnlistable = false; meetingsMessage = ""
@@ -1004,6 +1234,75 @@ final class AppModel: ObservableObject {
             refreshSavedMeetings()
             meetingsMessage = "Some meetings couldn’t be deleted from this Mac. Try again."
             announce(meetingsMessage)
+        }
+    }
+    // MARK: Meetings settings
+
+    /// The meetings folder with the user's backup choice, for every store this model builds.
+    private func meetingStore(_ base: URL) -> MeetingStore { MeetingStore(meetingsIn: base, excludedFromBackup: !meetingBackups) }
+    /// `meetingBackups` as stored: only a real `true` includes meetings in backups.
+    static func storedMeetingBackups(_ value: Any?) -> Bool { value as? Bool ?? false }
+    /// Any stored value other than `true` was written after the switch was on, as it starts absent.
+    static func meetingBackupsWereIncluded(_ value: Any?) -> Bool { value != nil && !storedMeetingBackups(value) }
+    static let meetingBackupFailure = "The meetings folder’s backup setting couldn’t be changed."
+    /// What the copy can say about Time Machine and the meetings folder.
+    enum MeetingBackupStatus: Equatable {
+        /// Out of Time Machine since the folder was made.
+        case excluded
+        case included
+        /// Out of new Time Machine backups; ones made while the switch was on may keep copies.
+        case excludedAfterIncluded
+        /// The choice couldn't be applied to the folder, so neither is claimed.
+        case unconfirmed
+    }
+    var meetingBackupStatus: MeetingBackupStatus {
+        !meetingBackupMessage.isEmpty ? .unconfirmed : meetingBackups ? .included : meetingBackupsWereIncluded ? .excludedAfterIncluded : .excluded
+    }
+    /// Settings → Meetings' retention, set only by the user's choice there; expired meetings are deleted at once.
+    func chooseMeetingRetention(_ retention: DocumentRetention) {
+        guard showsMeetingsSpace, retention != meetingRetention else { return }
+        meetingRetention = retention
+        guard !previewMode else { return }
+        UserDefaults.standard.set(retention.rawValue, forKey: "meetingRetention")
+        pruneMeetings()
+    }
+    /// How many saved meetings `retention` would delete now, read from the folder off the main actor so a library
+    /// not loaded yet never counts as empty. The shown meeting is kept, as pruning keeps it.
+    func meetingsExpiring(under retention: DocumentRetention, now: Date = Date()) async -> Int {
+        guard showsMeetingsSpace, retention.interval != nil else { return 0 }
+        let keeping = meetings.meeting?.id
+        let documents: [Meeting]
+        if previewMode { documents = meetingLibrary } else {
+            guard let meetingsBase else { return 0 }
+            let store = meetingStore(meetingsBase)
+            documents = await Task.detached(priority: .userInitiated) { store.loadAll(sweepingStaging: false).documents }.value
+        }
+        return retention.expired(documents, now: now).filter { $0 != keeping }.count
+    }
+    /// Settings → Meetings' backup switch, only while the space is visible.
+    func setMeetingBackups(_ included: Bool) {
+        guard showsMeetingsSpace, included != meetingBackups else { return }
+        meetingBackups = included; meetingBackupMessage = ""
+        if !included { meetingBackupsWereIncluded = true }
+        guard !previewMode else { return }
+        UserDefaults.standard.set(included, forKey: "meetingBackups")
+        applyMeetingBackups()
+    }
+    /// The stored choice, applied to the folder that exists, in order. While the space is visible it goes through the
+    /// controller's writer, after every save already sent, so a folder a later save creates gets it too. Try again
+    /// repeats it.
+    func applyMeetingBackups() {
+        guard !previewMode, let meetingsBase else { return }
+        let excluded = !meetingBackups, previous = meetingBackupApply
+        meetingBackupApply = Task { [weak self] in
+            await previous?.value
+            guard let self else { return }
+            let applied = showsMeetingsSpace ? await meetings.setExcludedFromBackup(excluded)
+                : (try? MeetingStore(meetingsIn: meetingsBase, excludedFromBackup: excluded).applyBackupChoice()) != nil
+            // A newer choice reports for itself.
+            guard excluded == !meetingBackups else { return }
+            meetingBackupMessage = applied ? "" : Self.meetingBackupFailure
+            if !applied { announce(meetingBackupMessage) }
         }
     }
     /// Quit, logout, restart or shutdown: capture stops now, before anything awaits. The task ends once the meeting
@@ -1327,10 +1626,12 @@ final class AppModel: ObservableObject {
     @objc private func screenUnlocked() { announceBoundaryPause() }
     func cancelForBoundary(_ reason: MeetingStretchEnd = .lockOrSleep) {
         clearLastDictationChange()
-        if meetings.isOpen {
+        let meetingOpen = meetings.isOpen
+        if meetingOpen, meetings.isCapturing { boundaryPause = (reason, meetings.phase == .preparing) }
+        // Always: it also clears an acknowledgment checked in setup or for Continue, since the call may have changed.
+        meetings.boundary(reason)
+        if meetingOpen {
             // Pause and keep: a gap marks it, nothing resumes on its own, and the models unload once the rings drain.
-            if meetings.isCapturing { boundaryPause = (reason, meetings.phase == .preparing) }
-            meetings.boundary(reason)
             requestUnload(); return
         }
         if isRecordingNote {
@@ -1439,6 +1740,7 @@ final class AppModel: ObservableObject {
         lastChangeExpiry?.cancel(); lastDictationChange = nil; lastChangeCopyFailed = false; lastChangeExpiredWhileFocused = false; practiceChange = nil
         // Meeting visibility and retention are forced in memory only; the defaults are never written or read here.
         showsMeetingsSpace = false; savedMeetingCount = 0; meetingsUnlistable = false; meetingsMessage = ""; meetingRetention = .untilDeleted
+        meetingBackups = false; meetingBackupsWereIncluded = false; meetingBackupMessage = ""
         meetings.configurePreview(nil, phase: .idle)
         if state.hasPrefix("home-meeting") || state == "notes-meeting" {
             showsMeetingsSpace = true
@@ -1452,8 +1754,22 @@ final class AppModel: ObservableObject {
             meetings.configurePreview(Self.previewMeeting, phase: phase, sourceStates: phase == .recording ? [.you: .live, .others: .live] : [.you: .off, .others: .off],
                                       elapsed: 754, needsAcknowledgment: phase == .paused)
         }
+        meetingsRoute = .library; meetingLibrary = []; meetingLibraryUnreadable = 0; meetingsToReview = []; closedRecoveryNotices = []
+        showingOriginalTranscription = false; includeZoomSound = false; meetingSetupFailure = nil; meetingsFocusRequest = nil
+        meetingAppSoundSupported = Self.appSoundAvailable
+        if state.hasPrefix("meeting") || state == "home-during-meeting" { configureMeetingsPreview(state) }
         if state.hasPrefix("settings-privacy-saved-meetings") { savedMeetingCount = 3 }
         if state == "settings-privacy-saved-meetings-days30" { meetingRetention = .days30 }
+        // Hidden after the backups switch was turned on: the folder stays in backups, and Privacy says so.
+        if state == "settings-privacy-saved-meetings-backups" { meetingBackups = true }
+        // The switch was on and then turned off; or the choice couldn't be applied to the folder.
+        if state.hasSuffix("-backups-off") { meetingBackupsWereIncluded = true }
+        if state == "settings-privacy-saved-meetings-backup-failed" { meetingBackupMessage = Self.meetingBackupFailure }
+        if state.hasPrefix("settings-meetings") {
+            showsMeetingsSpace = true
+            meetingLibrary = [MeetingPreviews.finished, MeetingPreviews.recovered, MeetingPreviews.microphoneOnly, MeetingPreviews.oneOnOne]
+            if state == "settings-meetings-backups" { meetingBackups = true; meetingRetention = .days90 }
+        }
         if state == "settings-privacy-meetings-unlistable" { meetingsUnlistable = true }
         if state.hasSuffix("-dictionary") { previewDictionary(.loaded(Self.previewWords)) }
         if state == "dictionary" || state == "dictionary-recording" { previewDictionary(.loaded(Self.previewPageWords)) }
@@ -1541,6 +1857,36 @@ final class AppModel: ObservableObject {
         }
         notify()
     }
+    /// The Meetings space with synthetic meetings only; nothing is read, written or started.
+    private func configureMeetingsPreview(_ state: String) {
+        showsMeetingsSpace = true
+        let previews = MeetingPreviews.self
+        meetingLibrary = state == "meetings-empty" ? [] : [previews.finished, previews.recovered, previews.microphoneOnly, previews.oneOnOne]
+        switch state {
+        case "meetings-library", "meetings-library-720": meetingsToReview = [previews.recovered.id]
+        case "meeting-setup", "meeting-setup-computer-audio-intro", "meeting-mic-only", "meeting-setup-not-saved":
+            meetingsRoute = .setup
+            includeZoomSound = state == "meeting-setup-computer-audio-intro"
+            if state == "meeting-mic-only" { meetingAppSoundSupported = false }
+            // The finished meeting shown before couldn't be saved, so setup says why Start waits and offers Try again.
+            if state == "meeting-setup-not-saved" { meetings.configurePreview(previews.finished, phase: .finished, notSaved: true) }
+        case "meeting-recording", "meeting-recording-720", "meeting-recording-900", "home-during-meeting":
+            meetings.configurePreview(previews.live, phase: .recording, provisional: [.others: "I think we could move the shortcut choice to the end and"],
+                                      sourceStates: [.you: .live, .others: .live], elapsed: 137)
+        case "meeting-paused", "meeting-resume-acknowledge", "meeting-call-ended":
+            let ended: MeetingStretchEnd = state == "meeting-paused" ? .pauseButton : state == "meeting-call-ended" ? .callEnded : .lockOrSleep
+            meetings.configurePreview(previews.paused(ended), phase: .paused, sourceStates: [.you: .off, .others: .off], elapsed: 754,
+                                      needsAcknowledgment: ended != .pauseButton)
+        case "meeting-recovered", "meeting-finished", "meeting-finished-720", "meeting-dictionary-fixes":
+            let meeting = state == "meeting-recovered" ? previews.recovered : state.hasPrefix("meeting-finished") ? previews.finished : previews.fixes
+            if state == "meeting-recovered" { meetingsToReview = [meeting.id] }
+            if state == "meeting-dictionary-fixes" { previewDictionary(.loaded(Self.previewWords)); meetingLibrary.insert(meeting, at: 0) }
+            _ = openMeeting(meeting.id)
+            meetingsFocusRequest = nil
+        default: break
+        }
+        if meetings.isOpen { meetingsRoute = .meeting; meetingLibrary.insert(meetings.meeting!, at: 0) }
+    }
     /// A synthetic meeting for previews and native checks only.
     static let previewMeeting = Meeting(id: UUID(uuidString: "6F1D2C3B-4A59-4E68-9F70-8192A3B4C5D6")!, title: "Weekly planning",
         created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
@@ -1556,6 +1902,9 @@ final class AppModel: ObservableObject {
 }
 
 enum CaptureActivity { case none, dictation, note, meeting }
+enum MeetingsRoute { case library, setup, meeting }
+/// Where focus goes in the Meetings space after an action.
+enum MeetingsFocus: Equatable { case newMeeting, row(UUID), title, notes, export, firstTurn, acknowledgment }
 
 /// A meeting's stretches hold the one session the way a note recording does, so every guard on `phase` and
 /// `workerBusy` applies while it captures.
@@ -1566,11 +1915,18 @@ extension AppModel: MeetingHost {
 
     /// What holds capture, in order, before whether Within is ready.
     func meetingStartRefusal() -> String? {
+        if let holder = meetingCaptureHolder { return holder }
+        refreshPermissions(mayRegisterShortcut: true)
+        return meetingReadinessRefusal
+    }
+    fileprivate var meetingCaptureHolder: String? {
         if isRecordingNote { return "Stop your note recording to start meeting notes." }
         if phase == .preparing || phase == .recording || phase == .transcribing { return "Finish dictating to start meeting notes." }
         if phase == .recovery { return "Review your pending dictation first." }
         if hasActivePracticeSession || editingShortcut { return "Finish practice or the shortcut change first." }
-        refreshPermissions(mayRegisterShortcut: true)
+        return nil
+    }
+    fileprivate var meetingReadinessRefusal: String? {
         guard !canStart else { return nil }
         return modelBusy || workerBusy ? readinessWaitMessage : !modelInstalled || !microphoneAllowed ? "Finish setup before recording."
             : !selectedInputAvailable ? "Your selected microphone is unavailable." : "Check the local speech model in Settings."

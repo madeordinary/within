@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 import WithinCore
 
-enum AppPage { case home, notes, settings, help, setup, recovery }
+enum AppPage { case home, notes, meetings, settings, help, setup, recovery }
 
 /// Presentation state is transient; navigating never starts capture or clears words.
 @MainActor
@@ -21,6 +21,7 @@ final class AppNavigation: ObservableObject {
         let leavesPractice = destination != .home || practice == false
         guard !leavesPractice || allowPracticeExit(model: model, confirm: confirmPracticeExit) else { return false }
         guard destination != .recovery || model.phase == .recovery else { return false }
+        guard destination != .meetings || model.showsMeetingsSpace else { return false }
         if destination == .home { history.removeAll() }
         else if destination != page {
             if back { _ = history.popLast() } else { history.append(page) }
@@ -70,8 +71,9 @@ struct AppWindowView: View {
     @ViewBuilder private var content: some View {
         switch navigation.page {
         case .home, .setup:
-            MainView(model: model, practiceExpanded: navigation.practiceExpanded, togglePractice: togglePractice)
+            MainView(model: model, practiceExpanded: navigation.practiceExpanded, togglePractice: togglePractice, showMeeting: { navigate(.meetings) })
         case .notes: NotesView(model: model)
+        case .meetings: MeetingsView(model: model, meetings: model.meetings)
         case .settings: SettingsView(model: model)
         case .help: HelpView(model: model)
         case .recovery: RecoveryView(model: model)
@@ -79,7 +81,7 @@ struct AppWindowView: View {
     }
 }
 
-/// Spaces appear only once they work: Dictation and Notes now, Meetings later. No placeholder tabs.
+/// Spaces appear only once they work: Dictation and Notes, and Meetings only behind its developer default. No placeholder tabs.
 struct SidebarView: View {
     @ObservedObject var model: AppModel
     let page: AppPage
@@ -90,6 +92,10 @@ struct SidebarView: View {
             Brand(compact: true).padding(.horizontal, 10).padding(.top, 46).padding(.bottom, 22)
             item("Dictation", icon: "waveform", selected: page == .home) { navigate(.home) }
             item("Notes", icon: "note.text", selected: page == .notes, emphasized: model.isRecordingNote) { navigate(.notes) }
+            if model.showsMeetingsSpace {
+                item("Meetings", icon: "person.2.wave.2", selected: page == .meetings, emphasized: model.activeCapture == .meeting,
+                     badge: Self.meetingsBadge(phase: model.meetings.phase, toReview: model.meetingsToReview.count)) { navigate(.meetings) }
+            }
             if model.phase == .recovery {
                 item("Words to review", icon: "text.bubble", selected: page == .recovery, emphasized: true) { navigate(.recovery) }
             }
@@ -97,7 +103,7 @@ struct SidebarView: View {
             // The open section carries the highlight; the Settings row stays bold without a second fill.
             item("Settings", icon: "gearshape", selected: page == .settings, filled: false) { navigate(.settings) }
             if page == .settings {
-                ForEach(SettingsView.sections(showingDictionary: model.showsPersonalDictionary), id: \.0) { name, icon in
+                ForEach(SettingsView.sections(for: model), id: \.0) { name, icon in
                     item(name, icon: icon, selected: model.settingsSection == name, indent: true,
                          attention: name == "Dictionary" && model.dictionaryAttentionLine != nil) { openSettings(name) }
                 }
@@ -105,15 +111,38 @@ struct SidebarView: View {
             item("Help", icon: "questionmark.circle", selected: page == .help) { navigate(.help) }
         }.padding(.horizontal, 10).padding(.bottom, 14).frame(width: 196)
     }
+    /// The Meetings row's words, which are also its accessibility value: the open meeting's state, or how many
+    /// meetings Within recovered at launch that haven't been opened yet.
+    static func meetingsBadge(phase: MeetingLifecycle.Phase, toReview: Int) -> String? {
+        switch phase {
+        case .preparing, .recording: return "Recording"
+        case .pausing, .paused: return "Paused"
+        case .finishing: return "Finishing"
+        case .discarding: return "Discarding"
+        case .idle, .finished: return toReview > 0 ? "\(toReview) to review" : nil
+        }
+    }
     private func item(_ title: String, icon: String, selected: Bool, indent: Bool = false, emphasized: Bool = false,
-                      filled: Bool = true, attention: Bool = false, action: @escaping () -> Void) -> some View {
+                      filled: Bool = true, attention: Bool = false, badge: String? = nil, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 9) {
                 Image(systemName: icon).frame(width: 18)
                     .foregroundStyle(selected || emphasized ? Palette.accent : Palette.secondary)
-                Text(title)
-                Spacer(minLength: 0)
-                if emphasized { Circle().fill(Palette.accent).frame(width: 7, height: 7).accessibilityHidden(true) }
+                // The text badge is the notice; the dot alone is colour only.
+                if let badge {
+                    HStack(spacing: 4) {
+                        Text(title).lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(badge).font(.system(size: 9, weight: .semibold)).lineLimit(1).fixedSize()
+                            .foregroundStyle(emphasized ? Palette.accent : Palette.secondary)
+                            .padding(.horizontal, 4).padding(.vertical, 2).background(selected ? Palette.surface : Palette.tint, in: Capsule())
+                            .accessibilityHidden(true)
+                    }
+                } else {
+                    Text(title)
+                    Spacer(minLength: 0)
+                    if emphasized { Circle().fill(Palette.accent).frame(width: 7, height: 7).accessibilityHidden(true) }
+                }
                 if attention {
                     Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(Palette.warning)
                         .accessibilityLabel("Needs attention")
@@ -122,7 +151,15 @@ struct SidebarView: View {
                 .padding(.leading, indent ? 20 : 10).padding(.trailing, 10).padding(.vertical, indent ? 5 : 7)
                 .background(selected && filled ? Palette.tint : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .contentShape(Rectangle())
-        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : [])
+        }.buttonStyle(.plain).accessibilityAddTraits(selected ? .isSelected : []).modifier(SidebarBadgeValue(badge: badge))
+    }
+}
+
+/// Only a row with a badge gets an accessibility value; every other row stays exactly as it was.
+private struct SidebarBadgeValue: ViewModifier {
+    let badge: String?
+    func body(content: Content) -> some View {
+        if let badge { content.accessibilityValue(badge) } else { content }
     }
 }
 
@@ -130,6 +167,8 @@ struct MainView: View {
     @ObservedObject var model: AppModel
     var practiceExpanded = false
     var togglePractice: (Bool) -> Void = { _ in }
+    /// Opens the Meetings space while a meeting is open.
+    var showMeeting: (() -> Void)?
     @FocusState private var changeFocus: LastDictationChangeRow.Control?
     /// VoiceOver's cursor on the row; keyboard focus alone can't reach buttons while keyboard navigation is off.
     @AccessibilityFocusState private var changeVoiceOverFocus: LastDictationChangeRow.Control?
@@ -179,7 +218,7 @@ struct MainView: View {
                         Text(subtitle)
                             .font(.system(size: 13)).foregroundStyle(Palette.secondary)
                     }
-                    SessionStatusView(model: model, focusRequest: statusFocusRequest)
+                    SessionStatusView(model: model, focusRequest: statusFocusRequest, showMeeting: showMeeting)
                     // The dictionary can't do what the user set up; the words are written as transcribed.
                     if let line = model.dictionaryAttentionLine {
                         HStack(spacing: 10) {
@@ -323,10 +362,14 @@ struct SessionStatusView: View {
     @ObservedObject var model: AppModel
     /// Changing it moves VoiceOver to the status message after a control removed itself.
     var focusRequest = 0
+    /// The meeting's own screen; the only control while a meeting is open.
+    var showMeeting: (() -> Void)?
     @AccessibilityFocusState private var messageFocused: Bool
+    /// Dictation's Stop and Cancel would end a meeting's session, so a meeting gets its own status and none of them.
+    static func showsDictationControls(_ model: AppModel) -> Bool { model.activeCapture != .meeting }
     var body: some View {
-        if model.activeCapture == .meeting {
-            // No Stop or Cancel: dictation's controls never reach a meeting. Its own screen comes with the Meetings space.
+        if !Self.showsDictationControls(model) {
+            // No Stop or Cancel: the meeting's own screen has Pause, Finish and Discard.
             HStack(spacing: 10) {
                 HStack(spacing: 8) {
                     MeetingStatusText(meetings: model.meetings)
@@ -337,6 +380,7 @@ struct SessionStatusView: View {
                 }.padding(.horizontal, 12).padding(.vertical, 7)
                     .background(Palette.tint.opacity(0.5), in: Capsule())
                 Spacer(minLength: 6)
+                if let showMeeting, model.showsMeetingsSpace { Button("Show meeting", action: showMeeting).primaryAction() }
             }.onChange(of: focusRequest) { messageFocused = true }
         } else {
             dictationStatus

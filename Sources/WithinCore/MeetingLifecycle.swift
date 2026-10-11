@@ -319,3 +319,14 @@ public struct MeetingCheckpointGate: Sendable {
 
     public mutating func delete(_ id: UUID) { deleted.insert(id); admitted[id] = nil }
 }
+
+/// The acknowledgment asked before every Start, Continue and a Resume after the call may have changed.
+public enum MeetingAcknowledgment {
+    public static let sentence = "Everyone in this meeting knows it’s being transcribed."
+
+    /// Why the button that starts capture is disabled: what holds capture or keeps Within from being ready comes
+    /// first, since checking the box can't fix it; then the unchecked box. Nil when it may start.
+    public static func blocker(acknowledged: Bool, refusal: String?, action: String = "start") -> String? {
+        refusal ?? (acknowledged ? nil : "Check the box above to \(action).")
+    }
+}

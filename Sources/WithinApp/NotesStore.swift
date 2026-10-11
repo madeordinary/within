@@ -152,24 +152,33 @@ enum MeetingUpkeep {
         var saved = 0
         var recovered = 0, deleted = 0, pruned = 0, failed = 0
         var unlistable = false
+        /// The meetings saved back as finished, still left after pruning: "to review" until opened in this run.
+        var recoveredIDs: [UUID] = []
+        /// The backup choice couldn't be applied to the folder.
+        var backupFailed = false
     }
 
-    /// At launch, before anything else uses the folder: crash leftovers swept, meetings a crash left open saved back
-    /// as finished (or deleted when they hold nothing), then expired meetings deleted. Nil when there is no folder.
-    static func atLaunch(base: URL, retention: DocumentRetention, now: Date) -> Result? {
-        run(MeetingStore(meetingsIn: base), retention: retention, now: now, launch: true, keeping: [])
+    /// At launch, before anything else uses the folder: the stored backup choice applied to it (it is written only
+    /// when a folder is created, so this repairs a crash in between), crash leftovers swept, meetings a crash left
+    /// open saved back as finished (or deleted when they hold nothing), then expired meetings deleted. Nil when there
+    /// is no folder.
+    static func atLaunch(base: URL, retention: DocumentRetention, excludedFromBackup: Bool = Meeting.excludedFromBackup, now: Date) -> Result? {
+        run(MeetingStore(meetingsIn: base, excludedFromBackup: excludedFromBackup), retention: retention, now: now, launch: true, keeping: [])
     }
 
-    /// Hourly: expired finished meetings only, leaving staging files a save may be writing and `keeping` alone.
-    static func prune(base: URL, retention: DocumentRetention, now: Date, keeping: Set<UUID>) -> Result? {
-        run(MeetingStore(meetingsIn: base), retention: retention, now: now, launch: false, keeping: keeping)
+    /// Hourly and when retention changes: expired finished meetings only, leaving staging files a save may be
+    /// writing, the backup choice and `keeping` alone.
+    static func prune(base: URL, retention: DocumentRetention, excludedFromBackup: Bool = Meeting.excludedFromBackup, now: Date, keeping: Set<UUID>) -> Result? {
+        run(MeetingStore(meetingsIn: base, excludedFromBackup: excludedFromBackup), retention: retention, now: now, launch: false, keeping: keeping)
     }
 
     private static func run(_ store: MeetingStore, retention: DocumentRetention, now: Date, launch: Bool, keeping: Set<UUID>) -> Result? {
         guard store.exists else { return nil }
+        let backupFailed = launch && (try? store.applyBackupChoice()) == nil
         let loaded = store.loadAll(sweepingStaging: launch)
-        var result = Result(unlistable: loaded.unlistable)
+        var result = Result(unlistable: loaded.unlistable, backupFailed: backupFailed)
         var meetings = loaded.documents
+        var recovered: [UUID] = []
         if launch {
             let recovery = MeetingRecovery.recover(meetings)
             for id in recovery.deleted {
@@ -179,12 +188,13 @@ enum MeetingUpkeep {
                 // Checked again before each save, which would otherwise create a folder removed meanwhile.
                 guard store.exists, (try? store.save(meeting)) != nil, let index = meetings.firstIndex(where: { $0.id == meeting.id }) else { result.failed += 1; continue }
                 meetings[index] = meeting
-                result.recovered += 1
+                result.recovered += 1; recovered.append(meeting.id)
             }
         }
         for id in retention.expired(meetings, now: now) where !keeping.contains(id) {
             if (try? store.delete(id)) != nil { result.pruned += 1; meetings.removeAll { $0.id == id } } else { result.failed += 1 }
         }
+        result.recoveredIDs = recovered.filter { id in meetings.contains { $0.id == id } }
         result.saved = meetings.count + loaded.unreadable
         return result
     }

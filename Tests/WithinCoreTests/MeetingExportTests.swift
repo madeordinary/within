@@ -42,6 +42,49 @@ final class MeetingExportTests: XCTestCase {
         }
     }
 
+    // MARK: Timeline
+
+    func testTimelinePutsEachGapBeforeTheFirstTurnAfterItAndTheStopLast() {
+        var meeting = weeklySync
+        meeting.stretches[1] = MeetingStretch(start: 2822, sources: [.you], end: 4324, ended: .unexpectedExit)
+        XCTAssertEqual(meeting.timeline.map(\.id), [meeting.segments[0].id.uuidString, meeting.segments[1].id.uuidString, "gap-0",
+                                                     meeting.segments[2].id.uuidString, "stop"])
+        XCTAssertEqual(meeting.timeline[2], .gap(MeetingGap(start: 2710, end: 2822, reason: .lockOrSleep), index: 0))
+        XCTAssertEqual(meeting.timeline.last, .stop(MeetingStop(at: 4324, reason: .unexpectedExit)))
+        // A gap with no turn after it yet, as while paused, still shows after the last turn.
+        let paused = Meeting(created: now, appName: "Zoom", segments: [MeetingSegment(source: .you, offset: 4, text: "Before the pause.")],
+                             stretches: [MeetingStretch(start: 0, sources: [.you], end: 10, ended: .pauseButton), MeetingStretch(start: 30, sources: [.you])])
+        XCTAssertEqual(paused.timeline.map(\.id), [paused.segments[0].id.uuidString, "gap-0"])
+        XCTAssertEqual(Meeting(created: now, appName: "Zoom").timeline, [])
+    }
+
+    func testLengthSourcesAndRecoveryAreReadFromTheStretches() {
+        XCTAssertEqual(weeklySync.length, 4324)
+        XCTAssertTrue(weeklySync.includesAppSound)
+        XCTAssertFalse(weeklySync.recovered)
+        var open = MeetingStretch(start: 0, sources: [.you])
+        open.lastCheckpoint = 42
+        let microphone = Meeting(created: now, appName: Meeting.microphoneOnly, stretches: [open])
+        XCTAssertEqual(microphone.length, 42)
+        XCTAssertFalse(microphone.includesAppSound)
+        XCTAssertEqual(Meeting(created: now, appName: "").length, 0)
+        XCTAssertFalse(Meeting(created: now, appName: "").includesAppSound)
+        var crashed = weeklySync
+        crashed.stretches[1].ended = .unexpectedExit
+        XCTAssertTrue(crashed.recovered)
+        // Continued after the crash: the gap remains, but the meeting is no longer waiting for review.
+        crashed.stretches.append(MeetingStretch(start: 5000, sources: [.you], end: 5100, ended: .finished))
+        XCTAssertFalse(crashed.recovered)
+    }
+
+    func testStartWaitsForTheAcknowledgmentAndNamesWhatHoldsCaptureFirst() {
+        XCTAssertEqual(MeetingAcknowledgment.blocker(acknowledged: false, refusal: nil), "Check the box above to start.")
+        XCTAssertEqual(MeetingAcknowledgment.blocker(acknowledged: false, refusal: nil, action: "resume"), "Check the box above to resume.")
+        XCTAssertNil(MeetingAcknowledgment.blocker(acknowledged: true, refusal: nil))
+        XCTAssertEqual(MeetingAcknowledgment.blocker(acknowledged: true, refusal: "Finish dictating to start meeting notes."), "Finish dictating to start meeting notes.")
+        XCTAssertEqual(MeetingAcknowledgment.blocker(acknowledged: false, refusal: "Finish dictating to start meeting notes."), "Finish dictating to start meeting notes.")
+    }
+
     // MARK: Markdown
 
     func testMarkdownHasHeaderLabelsTimestampsGapsAndNotesVerbatim() {

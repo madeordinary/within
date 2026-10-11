@@ -40,6 +40,7 @@ Sources/WithinApp/LocalSpeech.swift
 Sources/WithinApp/MeetingController.swift
 Sources/WithinApp/MeetingSessionFixture.swift
 Sources/WithinApp/MeetingSources.swift
+Sources/WithinApp/MeetingsView.swift
 Sources/WithinApp/ModelStore.swift
 Sources/WithinApp/ModelStoreCheck.swift
 Sources/WithinApp/NotesStore.swift

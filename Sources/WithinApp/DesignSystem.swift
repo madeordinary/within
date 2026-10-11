@@ -157,13 +157,23 @@ struct PrivacyFooter: View {
 }
 
 struct PermissionRow: View {
+    /// `unknown` is for a permission Within can't read, such as System Audio Recording: no state is claimed, and the
+    /// button opens System Settings.
+    enum Display { case allowed, needed, unknown }
     let title: String
     let detail: String
-    let allowed: Bool
+    let display: Display
     let action: () -> Void
+    init(title: String, detail: String, allowed: Bool, action: @escaping () -> Void) {
+        self.init(title: title, detail: detail, display: allowed ? .allowed : .needed, action: action)
+    }
+    init(title: String, detail: String, display: Display, action: @escaping () -> Void) {
+        self.title = title; self.detail = detail; self.display = display; self.action = action
+    }
     var body: some View {
+        let allowed = display == .allowed
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: allowed ? "checkmark.circle.fill" : "lock.circle")
+            Image(systemName: allowed ? "checkmark.circle.fill" : display == .unknown ? "info.circle" : "lock.circle")
                 .foregroundStyle(allowed ? Palette.accent : Palette.secondary).font(.system(size: 18)).accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 5) {
                 Text(title).font(.system(size: 13, weight: .semibold))
@@ -171,6 +181,7 @@ struct PermissionRow: View {
             }
             Spacer(minLength: 8)
             if allowed { Label("Allowed", systemImage: "checkmark").font(.system(size: 11)).foregroundStyle(Palette.accent) }
+            else if display == .unknown { Button("Open System Settings…", action: action).accessibilityLabel("Open System Settings for \(title)") }
             else { Button("Allow…", action: action).accessibilityLabel("Allow \(title)") }
         }.padding(.vertical, 4)
     }

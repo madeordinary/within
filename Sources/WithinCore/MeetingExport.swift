@@ -46,7 +46,47 @@ public struct MeetingStop: Equatable, Sendable {
     public func detail(appName: String) -> String? { MeetingGap(start: at, end: at, reason: reason).detail(appName: appName) }
 }
 
+/// One line of a meeting as the screen and the export list it.
+public enum MeetingTimelineRow: Equatable, Identifiable, Sendable {
+    case turn(MeetingSegment)
+    /// `index` counts the meeting's gaps, so each keeps its identity as turns are added.
+    case gap(MeetingGap, index: Int)
+    case stop(MeetingStop)
+
+    public var id: String {
+        switch self {
+        case .turn(let segment): return segment.id.uuidString
+        case .gap(_, let index): return "gap-\(index)"
+        case .stop: return "stop"
+        }
+    }
+}
+
 extension Meeting {
+    /// Meeting-relative seconds captured: where the last stretch ended, or its last checkpoint while it is open.
+    public var length: TimeInterval { stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0 }
+
+    /// Whether the meeting app's sound was included, rather than the microphone alone.
+    public var includesAppSound: Bool { !appName.isEmpty && appName != Self.microphoneOnly }
+
+    /// Within closed unexpectedly during it, and it hasn't been continued since.
+    public var recovered: Bool { stop?.reason == .unexpectedExit }
+
+    /// Turns in order, each gap before the first turn after it began, and where the meeting stopped without its last words.
+    public var timeline: [MeetingTimelineRow] {
+        var rows: [MeetingTimelineRow] = []
+        var gaps = Array(self.gaps.enumerated())[...]
+        for segment in segments {
+            while let next = gaps.first, segment.offset > next.element.start {
+                rows.append(.gap(next.element, index: next.offset)); gaps = gaps.dropFirst()
+            }
+            rows.append(.turn(segment))
+        }
+        rows += gaps.map { .gap($0.element, index: $0.offset) }
+        if let stop { rows.append(.stop(stop)) }
+        return rows
+    }
+
     /// Gap markers: the end of each closed stretch to the start of the next.
     public var gaps: [MeetingGap] {
         zip(stretches, stretches.dropFirst()).compactMap { earlier, later in
@@ -101,11 +141,10 @@ public enum MeetingSearch {
 public enum MeetingExport {
     public static func markdown(_ meeting: Meeting, dictionary: DictionaryMatcher, useOriginalTranscription: Bool = false,
                                 timeZone: TimeZone = .current) -> String {
-        let microphoneOnly = meeting.appName == Meeting.microphoneOnly || meeting.appName.isEmpty
-        let length = meeting.stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0
+        let microphoneOnly = !meeting.includesAppSound
         var header = [
             "# \(meeting.displayTitle)",
-            "\(format("yyyy-MM-dd HH:mm", meeting.created, timeZone)) · \(microphoneOnly ? Meeting.microphoneOnly : meeting.appName) · \(duration(length))",
+            "\(format("yyyy-MM-dd HH:mm", meeting.created, timeZone)) · \(microphoneOnly ? Meeting.microphoneOnly : meeting.appName) · \(duration(meeting.length))",
             microphoneOnly
                 ? "Transcribed on this Mac by Within. \"You\" is the microphone. Labels are sources, not people."
                 : "Transcribed on this Mac by Within. \"You\" is the microphone; \"Others\" is \(meeting.appName)’s audio. Labels are sources, not people.",
@@ -116,19 +155,18 @@ public enum MeetingExport {
             header.append(useOriginalTranscription ? "Original transcription, without personal dictionary fixes."
                 : "Personal dictionary fixes were applied in \(fixes) \(fixes == 1 ? "turn" : "turns"). The original transcription stays in Within.")
         }
-        var transcript: [String] = []
-        var gaps = meeting.gaps[...]
-        func gapLine(_ gap: MeetingGap) -> String {
-            "*— \(gap.label) \(clock(gap.start))–\(clock(gap.end))\(gap.detail(appName: meeting.appName).map { " · " + $0 } ?? "") —*"
-        }
-        for (segment, spelled) in zip(meeting.segments, spelled) {
-            while let gap = gaps.first, segment.offset > gap.start { transcript.append(gapLine(gap)); gaps = gaps.dropFirst() }
-            let text = useOriginalTranscription ? segment.text : spelled.text
-            transcript.append("**[\(clock(segment.offset))] \(segment.source == .you ? "You" : "Others"):** \(text)")
-        }
-        transcript += gaps.map(gapLine)
-        if let stop = meeting.stop {
-            transcript.append("*— Stopped at \(clock(stop.at))\(stop.detail(appName: meeting.appName).map { " · " + $0 } ?? "") —*")
+        var turn = 0
+        let transcript = meeting.timeline.map { row -> String in
+            switch row {
+            case .turn(let segment):
+                defer { turn += 1 }
+                let text = useOriginalTranscription ? segment.text : spelled[turn].text
+                return "**[\(clock(segment.offset))] \(segment.source == .you ? "You" : "Others"):** \(text)"
+            case .gap(let gap, _):
+                return "*— \(gap.label) \(clock(gap.start))–\(clock(gap.end))\(gap.detail(appName: meeting.appName).map { " · " + $0 } ?? "") —*"
+            case .stop(let stop):
+                return "*— Stopped at \(clock(stop.at))\(stop.detail(appName: meeting.appName).map { " · " + $0 } ?? "") —*"
+            }
         }
         // Blank lines keep each line its own paragraph in any Markdown reader.
         var blocks = [header.joined(separator: "\n\n"), "## Transcript", transcript.joined(separator: "\n\n")]
@@ -144,12 +182,13 @@ public enum MeetingExport {
     }
 
     /// Hours:minutes:seconds, always two-digit hours, for timestamps and gap markers.
-    static func clock(_ seconds: TimeInterval) -> String {
+    public static func clock(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
         return String(format: "%02d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
     }
 
-    static func duration(_ seconds: TimeInterval) -> String {
+    /// "1:12:04": a meeting's length.
+    public static func duration(_ seconds: TimeInterval) -> String {
         let total = max(0, Int(seconds))
         return String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
     }
