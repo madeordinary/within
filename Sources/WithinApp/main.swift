@@ -27,7 +27,7 @@ func benchmark() async {
             "inferenceSeconds": Double(duration.components.seconds) + Double(duration.components.attoseconds) / 1e18,
             "syntheticFixtureTranscript": text,
             "modelRevision": manifest.revision]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[4]))
         if CommandLine.arguments[1] == "--crash-fixture" { withExtendedLifetime((text, samples)) { abort() } }
         await engine.unload()
         print("Development fixture benchmark completed. Results contain synthetic fixture text only.")
@@ -51,6 +51,9 @@ if CommandLine.arguments.contains("--speech-safety-check") {
     if #available(macOS 26.0, *) { Task { await appleSpeechBenchmark() }; dispatchMain() } else { print("Needs macOS 26."); exit(2) }
 } else if CommandLine.arguments.contains("--meeting-tap-probe") {
     if #available(macOS 14.2, *) { Task { await meetingTapProbe() }; dispatchMain() } else { print("Needs macOS 14.2."); exit(2) }
+} else if CommandLine.arguments.contains("--meeting-session-fixture") {
+    Task { @MainActor in await meetingSessionFixture() }
+    dispatchMain()
 } else if CommandLine.arguments.contains("--audio-processes") {
     audioProcessList()
 } else if CommandLine.arguments.contains("--app-audio-tap-fixture") {

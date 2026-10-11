@@ -68,7 +68,7 @@ func speechSafetyCheck() async {
             "coldPrepareSeconds": coldPrepareSeconds, "warmPrepareSeconds": warmPrepareSeconds,
             "interceptedNetworkRequests": OfflineProbe.requestCount, "publicFixtures": fixtureReports, "allPassed": allPassed,
             "limitations": "Three public upstream regression clips and synthetic cancellation/silence inputs, not a general accuracy benchmark or live microphone test."]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[4]))
         await speech.unload()
         guard allPassed else { throw SpeechFailure.format }
         print("Local speech cancellation, silence, restart, and public-fixture seam checks passed."); exit(0)

@@ -384,6 +384,22 @@ func nativeChecks(to output: URL) throws {
     // Backup exclusion belongs to the kind of document: notes stay in backups.
     let meetingsStorePassed = meetingsExcludedFirst && meetingOwnerOnly && meetingReloaded && unlistableReported && meetingNotResurrected
         && !Note.excludedFromBackup && notesInBackups
+    // A preview meeting controller reports the phase `configurePreview` gave it, and never starts anything.
+    let previewMeetings = MeetingController(preview: true)
+    let previewMeeting = Meeting(title: "Synthetic", created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
+        segments: [MeetingSegment(source: .others, offset: 2, text: "synthetic meeting words")], notes: "",
+        stretches: [MeetingStretch(start: 0, sources: [.you, .others])])
+    var meetingPreviewPassed = true
+    let previewPhases: [(MeetingLifecycle.Phase, open: Bool, capturing: Bool)] = [(.idle, false, false), (.preparing, true, true), (.recording, true, true),
+        (.pausing, true, true), (.paused, true, false), (.finishing, true, true), (.discarding, true, true), (.finished, false, false)]
+    for (phase, open, capturing) in previewPhases {
+        previewMeetings.configurePreview(previewMeeting, phase: phase, needsAcknowledgment: phase == .paused)
+        meetingPreviewPassed = meetingPreviewPassed && previewMeetings.phase == phase && previewMeetings.isOpen == open
+            && previewMeetings.isCapturing == capturing && previewMeetings.needsAcknowledgment == (phase == .paused)
+        if phase == .paused { meetingPreviewPassed = meetingPreviewPassed && !previewMeetings.resume(acknowledged: true) }
+    }
+    meetingPreviewPassed = meetingPreviewPassed && !previewMeetings.start(app: nil, acknowledged: true)
+        && !previewMeetings.continueMeeting(app: nil, acknowledged: true) && previewMeetings.meeting == previewMeeting && previewMeetings.phase == .finished
     // Previews change the dictionary in memory only: no store, no file under the unused base, no preference written.
     let dictionaryPreview = fixture("ready")
     let unusedDictionary = output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Dictionary.noindex")
@@ -605,6 +621,7 @@ func nativeChecks(to output: URL) throws {
         "notesStoreOwnerOnlyAtomicPassed": notesStorePassed,
         "notesOneCaptureAtATimePassed": notesGuardsPassed,
         "meetingsStoreOwnerOnlyAtomicPassed": meetingsStorePassed,
+        "meetingPreviewControllerPassed": meetingPreviewPassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -614,8 +631,8 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"]]
-    try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    try writeReport(report, to: output)
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

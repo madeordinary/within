@@ -49,7 +49,7 @@ func modelStoreCheck() async {
         let report: [String: Any] = ["publicPinnedArtifactSubsetOnly": true, "files": subset.files.count, "bytes": subset.totalBytes,
             "downloadAndVerifyPassed": installed, "corruptedArtifactRefused": corruptRefused, "removalPassed": removed,
             "cancellationRemovedStaging": cancellationClean, "allPassed": installed && corruptRefused && removed && cancellationClean]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[3]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[3]))
         guard installed && corruptRefused && removed && cancellationClean else { throw ModelStoreError.download }
         print("Public model download, integrity refusal, and removal checks passed."); exit(0)
     } catch { print("Model-store fixture check failed."); exit(1) }

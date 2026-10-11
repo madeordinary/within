@@ -40,7 +40,7 @@ func appleSpeechBenchmark() async {
     var report: [String: Any] = ["fixtureOnly": true, "engine": "Apple SpeechTranscriber (progressiveTranscription, en-US)", "paced": paced]
     let output = URL(fileURLWithPath: args[4])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+        _ = try? writeReport(report, to: output); exit(code)
     }
     do {
         let transcriber = SpeechTranscriber(locale: Locale(identifier: "en-US"), preset: .progressiveTranscription)
@@ -126,7 +126,7 @@ func appleSpeechBenchmark() async {
         report["syntheticFixtureTranscript"] = text
         print("Apple speech fixture completed. No microphone was opened."); finish(0)
     } catch {
-        report["error"] = "\(error)"; print("Apple speech fixture failed."); finish(1)
+        report["error"] = "\(type(of: error))"; print("Apple speech fixture failed."); finish(1)
     }
 }
 

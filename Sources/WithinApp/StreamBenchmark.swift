@@ -5,6 +5,16 @@ import FluidAudio
 import WithinCore
 import Darwin
 
+/// Developer reports are owner-only (0600), even when they replace an earlier report, and never follow a link.
+func writeReport(_ report: [String: Any], to url: URL) throws {
+    let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+    let descriptor = open(url.path, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, 0o600)
+    guard descriptor >= 0 else { throw CocoaError(.fileWriteNoPermission) }
+    let handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    guard fchmod(descriptor, 0o600) == 0 else { throw CocoaError(.fileWriteNoPermission) }
+    try handle.write(contentsOf: data)
+}
+
 /// Developer-only, file-backed substitute for microphone capture. It exercises
 /// the production C ring, resampler, incremental inference, and final flush.
 func streamBenchmark() async {
@@ -53,7 +63,7 @@ func streamBenchmark() async {
             "releaseToResultSeconds": seconds(stopped, finished), "ringCapacitySamples": ring.capacity,
             "ringFinalStatus": ring.status, "peakResidentBytes": usage.ru_maxrss, "interceptedNetworkRequests": OfflineProbe.requestCount,
             "syntheticFixtureTranscript": text, "modelRevision": manifest.revision]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[4]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[4]))
         await speech.unload()
         print("Paced local fixture run completed. No microphone was opened."); exit(0)
     } catch { print("Paced fixture check failed."); exit(1) }
@@ -75,7 +85,7 @@ private final class UpdateLog: @unchecked Sendable {
     var current: (confirmed: Int, volatile: Int) { lock.lock(); defer { lock.unlock() }; return latest }
 }
 
-private func physicalFootprintMB() -> Double {
+func physicalFootprintMB() -> Double {
     var info = task_vm_info_data_t()
     var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
     let result = withUnsafeMutablePointer(to: &info) {
@@ -84,7 +94,7 @@ private func physicalFootprintMB() -> Double {
     return result == KERN_SUCCESS ? Double(info.phys_footprint) / 1_048_576 : -1
 }
 
-private func loadFixture(_ path: String) throws -> (samples: [Float], rate: Double) {
+func loadFixture(_ path: String) throws -> (samples: [Float], rate: Double) {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
     let format = file.processingFormat
     guard format.commonFormat == .pcmFormatFloat32, format.channelCount > 0, file.length > 1600,
@@ -152,7 +162,7 @@ func liveTextBenchmark() async {
             "syntheticFixtureTranscript": final,
             "lagMethod": "character share of final transcript × audio pushed; assumes even speech density; estimate only",
             "interceptedNetworkRequests": OfflineProbe.requestCount]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[5]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[5]))
         await speech.unload()
         print("Live-text fixture run completed. No microphone was opened."); exit(0)
     } catch { print("Live-text fixture check failed."); exit(1) }
@@ -217,20 +227,13 @@ func longSessionSoak() async {
             "baselineFootprintMB": baseline, "afterModelLoadFootprintMB": loaded, "perMinute": minutesLog,
             "finalFlushSeconds": finished - closed, "totalWallSeconds": finished, "finalCharacters": final.count,
             "peakResidentBytes": usage.ru_maxrss, "ringFinalStatus": ring.status, "interceptedNetworkRequests": OfflineProbe.requestCount]
-        try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: URL(fileURLWithPath: CommandLine.arguments[5]))
+        try writeReport(report, to: URL(fileURLWithPath: CommandLine.arguments[5]))
         await speech.unload()
         print("Long-session fixture soak completed. No microphone was opened."); exit(0)
     } catch { print("Long-session fixture soak failed."); exit(1) }
 }
 
 // MARK: Meetings feasibility (developer-only)
-
-private func audioProperty<T>(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector, _ initial: T) -> T? {
-    var address = AudioObjectPropertyAddress(mSelector: selector, mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-    var value = initial
-    var size = UInt32(MemoryLayout<T>.size)
-    return AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value) == noErr ? value : nil
-}
 
 /// Lists audio clients by bundle ID with their running-input/output flags. This is the
 /// meeting-detection signal: it reads no window titles, audio, or call content.
@@ -242,9 +245,9 @@ func audioProcessList() {
     guard AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &size, &objects) == noErr else { print("Process list unavailable."); exit(1) }
     print("audio processes: \(objects.count)")
     for object in objects {
-        let bundle = audioProperty(object, kAudioProcessPropertyBundleID, nil as CFString?).flatMap { $0 as String? } ?? "(none)"
-        let input = audioProperty(object, kAudioProcessPropertyIsRunningInput, UInt32(0)) ?? 0
-        let output = audioProperty(object, kAudioProcessPropertyIsRunningOutput, UInt32(0)) ?? 0
+        let bundle = CoreAudioProperty.string(object, kAudioProcessPropertyBundleID) ?? "(none)"
+        let input = CoreAudioProperty.uint32(object, kAudioProcessPropertyIsRunningInput) ?? 0
+        let output = CoreAudioProperty.uint32(object, kAudioProcessPropertyIsRunningOutput) ?? 0
         print("\(bundle)\tinput=\(input)\toutput=\(output)")
     }
     exit(0)
@@ -262,7 +265,7 @@ func appAudioTapFixture() async {
     var report: [String: Any] = ["fixtureOnly": true, "tappedProcess": "afplay", "muted": true]
     let output = URL(fileURLWithPath: CommandLine.arguments[5])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output)
+        _ = try? writeReport(report, to: output)
         exit(code)
     }
     do {
@@ -309,9 +312,7 @@ func appAudioTapFixture() async {
         guard tapStatus == noErr else { player.terminate(); finish(1) }
         defer { AudioHardwareDestroyProcessTap(tap) }
 
-        var outputDevice = AudioObjectID(kAudioObjectUnknown)
-        outputDevice = audioProperty(AudioObjectID(kAudioObjectSystemObject), kAudioHardwarePropertyDefaultSystemOutputDevice, outputDevice) ?? outputDevice
-        let outputUID = audioProperty(outputDevice, kAudioDevicePropertyDeviceUID, nil as CFString?).flatMap { $0 as String? } ?? ""
+        let outputUID = AppAudioTap.outputUID(kAudioHardwarePropertyDefaultSystemOutputDevice) ?? ""
         let aggregateDescription: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Within fixture tap", kAudioAggregateDeviceUIDKey: UUID().uuidString,
             kAudioAggregateDeviceMainSubDeviceKey: outputUID, kAudioAggregateDeviceIsPrivateKey: true,
@@ -401,7 +402,7 @@ func twoStreamMeetingFixture() async {
     var report: [String: Any] = ["fixtureOnly": true, "othersVia": "muted per-app tap of afplay", "youVia": "real-time fixture ring (no microphone)"]
     let output = URL(fileURLWithPath: CommandLine.arguments[5])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+        _ = try? writeReport(report, to: output); exit(code)
     }
     do {
         URLProtocol.registerClass(OfflineProbe.self)
@@ -441,8 +442,8 @@ func twoStreamMeetingFixture() async {
         let start = clock.now
         @Sendable func offset() -> Double { let c = start.duration(to: ContinuousClock.now).components; return Double(c.seconds) + Double(c.attoseconds) / 1e18 }
         let tapRate = tap.sampleRate
-        let othersTask = Task { try await speech.consumeStream("others", ring: othersRing, sampleRate: tapRate) { confirmed, _ in shared.update(.others, confirmed, at: offset()) } }
-        let youTask = Task { try await speech.consumeStream("you", ring: youRing, sampleRate: rate) { confirmed, _ in shared.update(.you, confirmed, at: offset()) } }
+        let othersTask = Task { await speech.consumeStream("others", ring: othersRing, sampleRate: tapRate) { shared.update(.others, $0.confirmed, at: offset()) } }
+        let youTask = Task { await speech.consumeStream("you", ring: youRing, sampleRate: rate) { shared.update(.you, $0.confirmed, at: offset()) } }
         var memory: [Double] = []
         let block = Int(rate / 10)
         try await clock.sleep(until: start.advanced(by: .seconds(2)))
@@ -459,8 +460,8 @@ func twoStreamMeetingFixture() async {
         let othersStatus = othersRing.status
         tap.stop()
         let closed = offset()
-        let youText = try await youTask.value
-        let othersText = try await othersTask.value
+        let youText = try await youTask.value.checkedText()
+        let othersText = try await othersTask.value.checkedText()
         shared.update(.you, youText, at: offset()); shared.update(.others, othersText, at: offset())
         await speech.unload()
         let segments = shared.segments
@@ -481,39 +482,63 @@ func twoStreamMeetingFixture() async {
 
 /// Developer-only live probe for a real call: lists the meeting app's audio processes, then
 /// taps them **unmuted** (the call stays audible) for a few seconds and transcribes locally.
-/// Saves only the named report; audio is never written.
+/// Saves only the named report (owner-only); audio is never written. It records what the product
+/// would refuse, such as an aggregate with more than one input stream, so one run answers the open questions.
+/// `defaultOutput` clocks the aggregate with the default output device instead of the alert device. On the main
+/// actor, where the tap's listener reports arrive, so its start and stop never race them.
 @available(macOS 14.2, *)
-func meetingTapProbe() async {
+@MainActor func meetingTapProbe() async {
     let args = CommandLine.arguments
-    guard args.count == 6, let seconds = Double(args[4]) else {
-        print("Usage: Within --meeting-tap-probe model-directory bundle-prefix seconds output-json"); exit(2)
+    guard args.count == 6 || (args.count == 7 && args[6] == "defaultOutput"), let seconds = Double(args[4]) else {
+        print("Usage: Within --meeting-tap-probe model-directory bundle-prefix seconds output-json [defaultOutput]"); exit(2)
     }
+    let clock: AppAudioTap.OutputClock = args.count == 7 ? .defaultOutput : .systemOutput
     var report: [String: Any] = ["liveProbe": true, "bundlePrefix": args[3], "muted": false]
     let output = URL(fileURLWithPath: args[5])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+        _ = try? writeReport(report, to: output); exit(code)
     }
+    // Sampled before the tap and again at the end, so a mute in the call between them shows in the flags.
+    func flags(_ objects: [AudioObjectID]) -> [[String: Any]] {
+        objects.map { object in
+            ["bundleID": AppAudioTap.bundleID(of: object) ?? "",
+             "runningInput": CoreAudioProperty.uint32(object, kAudioProcessPropertyIsRunningInput) == 1,
+             "runningOutput": CoreAudioProperty.uint32(object, kAudioProcessPropertyIsRunningOutput) == 1]
+        }
+    }
+    let tap = AppAudioTap()
     do {
         let objects = AppAudioTap.processObjects(bundlePrefixes: [args[3]])
-        report["processes"] = objects.map { object -> [String: Any] in
-            ["bundleID": AppAudioTap.bundleID(of: object) ?? "",
-             "runningInput": (audioProperty(object, kAudioProcessPropertyIsRunningInput, UInt32(0)) ?? 0) == 1,
-             "runningOutput": (audioProperty(object, kAudioProcessPropertyIsRunningOutput, UInt32(0)) ?? 0) == 1]
-        }
+        report["processes"] = flags(objects)
         guard !objects.isEmpty else { report["error"] = "no audio process for that app"; finish(1) }
         let speech = LocalSpeech()
         try await speech.prepare(directory: URL(fileURLWithPath: args[2]), manifest: try loadManifest())
         try await speech.beginStream("others")
-        let tap = AppAudioTap()
-        let ring = try tap.start(processes: objects, mute: .unmuted, limits: .note)
+        let counts = AppAudioTap.CallbackCounts()
+        let changes = ProbeChanges()
+        tap.onChange = { change, _ in changes.append(change == .lost ? "lost" : "changed") }
+        let ring: AudioRing
+        do { ring = try tap.start(processes: objects, mute: .unmuted, limits: .note, matching: [args[3]], clock: clock, refuseExtraInputStreams: false, counts: counts) }
+        catch { recordAggregate(tap, into: &report); throw error }
+        recordAggregate(tap, into: &report)
         let rate = tap.sampleRate
-        let recognition = Task { try await speech.consumeStream("others", ring: ring, sampleRate: rate) }
+        let recognition = Task { await speech.consumeStream("others", ring: ring, sampleRate: rate) }
         try await Task.sleep(for: .seconds(seconds))
+        report["processesAtEnd"] = flags(objects)
+        report["tappedProcessRunningInputAtEnd"] = tap.isAnyTappedProcessRunningInput()
         let captured = Double(ring.samplesCaptured) / rate
         let energy = ring.meanEnergy
         tap.stop()
-        let text = try await recognition.value
+        let text = try await recognition.value.checkedText()
         await speech.unload()
+        report["ioCallbacks"] = counts.callbacks
+        report["callbacksWithoutFrames"] = counts.callbacksWithoutFrames
+        report["digitallySilentCallbacks"] = counts.digitallySilentCallbacks
+        report["maxBuffersPerCallback"] = counts.maxBuffers
+        report["channelsPerBufferMax"] = counts.maxChannels
+        report["channelsPerBufferMin"] = counts.minChannels
+        report["framesDelivered"] = counts.frames
+        report["listenerChanges"] = changes.all
         report["capturedSeconds"] = captured
         report["captureMeanEnergy"] = energy
         report["silent"] = energy < 0.0000002
@@ -521,8 +546,34 @@ func meetingTapProbe() async {
         report["transcript"] = text
         print("Meeting tap probe completed."); finish(0)
     } catch {
-        report["error"] = "\(error)"; print("Meeting tap probe failed."); finish(1)
+        tap.stop()
+        // A tap failure carries only a Core Audio status or a stream count, which the owner needs to read the run.
+        report["error"] = (error as? AppAudioTap.Failure).map { "\($0)" } ?? "\(type(of: error))"
+        print("Meeting tap probe failed."); finish(1)
     }
+}
+
+/// Listener reports for the probe, collected on the main queue.
+private final class ProbeChanges: @unchecked Sendable {
+    private let lock = NSLock()
+    private var values: [String] = []
+    func append(_ value: String) { lock.lock(); values.append(value); lock.unlock() }
+    var all: [String] { lock.lock(); defer { lock.unlock() }; return values }
+}
+
+/// The aggregate's clock device, both output UIDs, its input streams and rates.
+@available(macOS 14.2, *)
+private func recordAggregate(_ tap: AppAudioTap, into report: inout [String: Any]) {
+    guard let configuration = tap.configuration else { return }
+    report["aggregateClockedBy"] = configuration.clock.rawValue
+    report["systemOutputUID"] = configuration.systemOutputUID ?? ""
+    report["defaultOutputUID"] = configuration.defaultOutputUID ?? ""
+    report["streamConfigurationReadable"] = configuration.inputStreamChannels != nil
+    report["aggregateInputStreams"] = configuration.inputStreamChannels?.count ?? -1
+    report["aggregateInputStreamChannels"] = configuration.inputStreamChannels ?? []
+    report["tapSampleRate"] = configuration.tapRate
+    report["aggregateSampleRate"] = configuration.aggregateRate ?? -1
+    report["productWouldRefuseInputStreams"] = configuration.inputStreamChannels?.count != 1
 }
 
 /// Developer-only: evaluates FluidAudio's true streaming models (Parakeet Unified, Nemotron) on
@@ -536,7 +587,7 @@ func streamingCandidateBenchmark() async {
     var report: [String: Any] = ["fixtureOnly": true, "candidate": args[2], "paced": paced]
     let output = URL(fileURLWithPath: args[6])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+        _ = try? writeReport(report, to: output); exit(code)
     }
     do {
         URLProtocol.registerClass(OfflineProbe.self)
@@ -612,7 +663,7 @@ func streamingCandidateBenchmark() async {
         report["syntheticFixtureTranscript"] = text
         print("Streaming candidate fixture completed. No microphone was opened."); finish(0)
     } catch {
-        report["error"] = "\(error)"; print("Streaming candidate fixture failed."); finish(1)
+        report["error"] = "\(type(of: error))"; print("Streaming candidate fixture failed."); finish(1)
     }
 }
 
@@ -626,7 +677,7 @@ func unifiedTwoStreamFixture() async {
     var report: [String: Any] = ["fixtureOnly": true, "candidate": "Parakeet Unified 0.6B int8 70/7/7, two sessions"]
     let output = URL(fileURLWithPath: args[6])
     func finish(_ code: Int32) -> Never {
-        _ = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]).write(to: output); exit(code)
+        _ = try? writeReport(report, to: output); exit(code)
     }
     do {
         URLProtocol.registerClass(OfflineProbe.self)
@@ -664,6 +715,6 @@ func unifiedTwoStreamFixture() async {
         report["interceptedNetworkRequests"] = OfflineProbe.requestCount
         print("Unified two-stream fixture completed. No microphone was opened."); finish(0)
     } catch {
-        report["error"] = "\(error)"; print("Unified two-stream fixture failed."); finish(1)
+        report["error"] = "\(type(of: error))"; print("Unified two-stream fixture failed."); finish(1)
     }
 }

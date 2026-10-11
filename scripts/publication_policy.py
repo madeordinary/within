@@ -37,6 +37,9 @@ Sources/WithinApp/SettingsView.swift
 Sources/WithinApp/CaptureEngine.swift
 Sources/WithinApp/CompatibilityPaste.swift
 Sources/WithinApp/LocalSpeech.swift
+Sources/WithinApp/MeetingController.swift
+Sources/WithinApp/MeetingSessionFixture.swift
+Sources/WithinApp/MeetingSources.swift
 Sources/WithinApp/ModelStore.swift
 Sources/WithinApp/ModelStoreCheck.swift
 Sources/WithinApp/NotesStore.swift
@@ -61,6 +64,7 @@ Sources/WithinCore/Diagnostics.swift
 Sources/WithinCore/DictationHistory.swift
 Sources/WithinCore/DocumentRetention.swift
 Sources/WithinCore/InsertionTrial.swift
+Sources/WithinCore/MeetingCapture.swift
 Sources/WithinCore/MeetingExport.swift
 Sources/WithinCore/MeetingHealth.swift
 Sources/WithinCore/MeetingLifecycle.swift
@@ -80,6 +84,7 @@ Tests/WithinCoreTests/ClipboardLeaseTests.swift
 Tests/WithinCoreTests/DictationHistoryTests.swift
 Tests/WithinCoreTests/InsertionTrialTests.swift
 Tests/WithinCoreTests/IntegrityTests.swift
+Tests/WithinCoreTests/MeetingCaptureTests.swift
 Tests/WithinCoreTests/MeetingExportTests.swift
 Tests/WithinCoreTests/MeetingHealthTests.swift
 Tests/WithinCoreTests/MeetingLifecycleTests.swift
