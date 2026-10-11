@@ -35,7 +35,7 @@ final class MeetingHealthTests: XCTestCase {
         XCTAssertEqual(health.poll(elapsed: 1, you: ring(10), others: nil, microphoneAuthorized: false), [.pause(.microphonePermission)])
     }
 
-    func testOthersStartAndStallRulesWaitForTheProbe() {
+    func testOthersStartAndStallRulesRunOnlyWhenTheAppDeliversSilence() {
         var unproven = MeetingHealthMonitor()
         XCTAssertEqual(unproven.poll(elapsed: 1, you: ring(10), others: ring(0), microphoneAuthorized: true), [])
         XCTAssertEqual(unproven.poll(elapsed: 10, you: ring(20), others: ring(0), microphoneAuthorized: true), [])
@@ -44,6 +44,34 @@ final class MeetingHealthTests: XCTestCase {
         var stalled = MeetingHealthMonitor(othersDeliversSilence: true)
         XCTAssertEqual(stalled.poll(elapsed: 1, you: ring(10), others: ring(10), microphoneAuthorized: true), [])
         XCTAssertEqual(stalled.poll(elapsed: 6, you: ring(20), others: ring(10), microphoneAuthorized: true), [.pause(.computerAudioStalled)])
+    }
+
+    func testOnlyZoomDeliversSilenceSoFar() {
+        XCTAssertTrue(MeetingHealthMonitor.deliversSilence(for: .zoom))
+        XCTAssertFalse(MeetingHealthMonitor.deliversSilence(for: .teams))
+        XCTAssertFalse(MeetingHealthMonitor.deliversSilence(for: nil))
+        XCTAssertFalse(MeetingHealthMonitor.deliversSilence(for: MeetingApp(name: "Synthetic app", bundlePrefixes: ["us.zoom.", "com.example."])))
+        XCTAssertFalse(MeetingHealthMonitor().othersDeliversSilence)
+    }
+
+    func testZoomMeetingFailsWithoutFirstAudioAndPausesWhenItsSoundStalls() {
+        var silent = MeetingHealthMonitor(othersDeliversSilence: MeetingHealthMonitor.deliversSilence(for: .zoom))
+        XCTAssertEqual(silent.poll(elapsed: 4.9, you: ring(10), others: ring(0), microphoneAuthorized: true), [])
+        XCTAssertEqual(silent.poll(elapsed: 5, you: ring(20), others: ring(0), microphoneAuthorized: true), [.startFailed(.computerAudioStalled)])
+        var stalled = MeetingHealthMonitor(othersDeliversSilence: MeetingHealthMonitor.deliversSilence(for: .zoom))
+        XCTAssertEqual(stalled.poll(elapsed: 1, you: ring(10), others: ring(4_800, level: 0), microphoneAuthorized: true), [])
+        XCTAssertEqual(stalled.poll(elapsed: 5.9, you: ring(20), others: ring(4_800, level: 0), microphoneAuthorized: true), [])
+        XCTAssertEqual(stalled.poll(elapsed: 6, you: ring(30), others: ring(4_800, level: 0), microphoneAuthorized: true), [.pause(.computerAudioStalled)])
+    }
+
+    func testOtherAppsAndMicrophoneOnlyMeetingsNeverStopForTheAppSound() {
+        for app in [MeetingApp.teams, nil] {
+            var health = MeetingHealthMonitor(othersDeliversSilence: MeetingHealthMonitor.deliversSilence(for: app))
+            XCTAssertEqual(health.poll(elapsed: 5, you: ring(10), others: app == nil ? nil : ring(0), microphoneAuthorized: true), [])
+            XCTAssertEqual(health.poll(elapsed: 20, you: ring(20), others: app == nil ? nil : ring(0), microphoneAuthorized: true), [])
+            XCTAssertEqual(health.poll(elapsed: 25, you: ring(30), others: app == nil ? nil : ring(4_800), microphoneAuthorized: true), [])
+            XCTAssertEqual(health.poll(elapsed: 31, you: ring(40), others: app == nil ? nil : ring(4_800), microphoneAuthorized: true), [])
+        }
     }
 
     func testQuietOtherSideIsOnlyAnAdvisoryNeverAPause() {

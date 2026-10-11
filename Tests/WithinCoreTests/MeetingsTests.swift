@@ -92,9 +92,20 @@ final class MeetingsTests: XCTestCase {
         XCTAssertEqual(try keys(MeetingStretch(start: 90, sources: [.you])), ["id", "start", "lastCheckpoint", "sources"])
     }
 
-    func testSegmentStoresOriginalTranscriptionOnlyWhenChanged() throws {
+    func testSegmentStoresOnlyTheTranscription() throws {
         XCTAssertEqual(try keys(MeetingSegment(source: .you, offset: 1, text: "Hi")), ["id", "source", "offset", "text"])
-        XCTAssertEqual(try keys(MeetingSegment(source: .you, offset: 1, text: "Jira", original: "gira")), ["id", "source", "offset", "text", "original"])
+    }
+
+    /// Before the dictionary was applied on read, a changed turn stored its fixed text with the transcription in
+    /// `original`. Such a file still decodes, keeping the transcription, and is saved back without the key.
+    func testSegmentWithAnEarlierOriginalKeyKeepsTheTranscription() throws {
+        let earlier = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FE","source":"you","offset":1,"text":"Synthetic Wurd","original":"synthetic wurd"}"#
+        let segment = try JSONDecoder().decode(MeetingSegment.self, from: Data(earlier.utf8))
+        XCTAssertEqual(segment, MeetingSegment(id: UUID(uuidString: "6F9619FF-8B86-D011-B42D-00C04FC964FE")!, source: .you, offset: 1, text: "synthetic wurd"))
+        XCTAssertEqual(try keys(segment), ["id", "source", "offset", "text"])
+        let plain = #"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FE","source":"others","offset":2,"text":"as transcribed"}"#
+        XCTAssertEqual(try JSONDecoder().decode(MeetingSegment.self, from: Data(plain.utf8)).text, "as transcribed")
+        XCTAssertThrowsError(try JSONDecoder().decode(MeetingSegment.self, from: Data(#"{"id":"6F9619FF-8B86-D011-B42D-00C04FC964FE","source":"you","offset":1,"original":"x"}"#.utf8)))
     }
 
     /// Builds 12 to 17 had this shape but never created a meeting store or wrote a meeting file, so stretches
@@ -106,7 +117,7 @@ final class MeetingsTests: XCTestCase {
 
     func testMeetingRoundTripsWithStretchesAndState() throws {
         var meeting = Meeting(title: "Weekly sync", created: now, appName: "Zoom",
-                              segments: [MeetingSegment(source: .you, offset: 3, text: "Jira", original: "gira")], notes: "Typed",
+                              segments: [MeetingSegment(source: .you, offset: 3, text: "gira")], notes: "Typed",
                               stretches: [MeetingStretch(start: 0, sources: [.you, .others], end: 40, ended: .pauseButton), MeetingStretch(start: 70, sources: [.you])])
         meeting.state = .finished
         XCTAssertEqual(try JSONDecoder().decode(Meeting.self, from: JSONEncoder().encode(meeting)), meeting)
@@ -246,60 +257,92 @@ final class MeetingsTests: XCTestCase {
         DictionaryMatcher(PersonalDictionary(entries: [DictionaryEntry(heardAs: [heardAs], writeAs: writeAs, created: now)]))
     }
 
-    func testYouTurnsApplyTheDictionaryAndKeepTheOriginal() {
+    private func shown(_ builder: MeetingTranscriptBuilder, _ words: DictionaryMatcher) -> [String] {
+        builder.segments.map { MeetingSpellings.turn($0, dictionary: words).text }
+    }
+
+    func testStoredSegmentTextStaysRaw() {
         var builder = MeetingTranscriptBuilder()
+        builder.update(.you, transcript: "I moved it to gira", at: 1)
+        builder.update(.others, transcript: "check gira", at: 2)
+        builder.update(.you, transcript: "I moved it to gira. Done", at: 3)
+        XCTAssertEqual(builder.segments.map(\.text), ["I moved it to gira", "check gira", "Done"])
+    }
+
+    func testYouAndOthersTurnsAreShownInYourSpellings() {
+        let meeting = Meeting(created: now, appName: "Zoom", segments: [MeetingSegment(source: .you, offset: 1, text: "I moved it to gira"),
+                                                                       MeetingSegment(source: .others, offset: 2, text: "check gira and gira"),
+                                                                       MeetingSegment(source: .others, offset: 3, text: "No change here")])
         let words = dictionary("Jira", "gira")
-        builder.update(.you, transcript: "I moved it to gira", at: 1, dictionary: words)
-        builder.update(.you, transcript: "I moved it to gira today", at: 2, dictionary: words)
-        XCTAssertEqual(builder.segments.map(\.text), ["I moved it to Jira today"])
-        XCTAssertEqual(builder.segments.map(\.original), ["I moved it to gira today"])
-        builder.update(.others, transcript: "No change here", at: 3, dictionary: words)
-        builder.update(.you, transcript: "I moved it to gira today. Done", at: 4, dictionary: words)
-        XCTAssertNil(builder.segments.last?.original)
+        let turns = meeting.segments.map { MeetingSpellings.turn($0, dictionary: words) }
+        XCTAssertEqual(turns.map(\.text), ["I moved it to Jira", "check Jira and Jira", "No change here"])
+        XCTAssertEqual(turns.map(\.original), meeting.segments.map(\.text))
+        XCTAssertEqual(turns.map(\.changes.count), [1, 2, 0])
+        XCTAssertEqual(MeetingSpellings.fixedTurns(in: meeting, dictionary: words), 2)
     }
 
-    func testOthersTurnsAreStoredUnfixed() {
+    func testEditingTheDictionaryChangesHowAMeetingReads() {
+        let segment = MeetingSegment(source: .others, offset: 1, text: "ask shivon about gira")
+        let meeting = Meeting(created: now, appName: "Zoom", segments: [segment])
+        XCTAssertEqual(MeetingSpellings.turn(segment, dictionary: dictionary("Jira", "gira")).text, "ask shivon about Jira")
+        XCTAssertEqual(MeetingSpellings.turn(segment, dictionary: dictionary("Siobhan", "shivon")).text, "ask Siobhan about gira")
+        XCTAssertEqual(MeetingSpellings.turn(segment, dictionary: .empty), DictionaryResult(unchanged: "ask shivon about gira"))
+        XCTAssertEqual(MeetingSpellings.fixedTurns(in: meeting, dictionary: .empty), 0)
+        XCTAssertEqual(MeetingSpellings.fixedTurns(in: meeting, dictionary: DictionaryMatcher(PersonalDictionary(enabled: false, entries: [
+            DictionaryEntry(heardAs: ["gira"], writeAs: "Jira", created: now)]))), 0)
+    }
+
+    func testTurnStartingAfterAnotherTurnMatchesAPhraseAtItsStart() {
+        let words = dictionary("Jira", "gira")
         var builder = MeetingTranscriptBuilder()
-        builder.update(.others, transcript: "check gira", at: 1, dictionary: dictionary("Jira", "gira"))
-        XCTAssertEqual(builder.segments.map(\.text), ["check gira"])
-        XCTAssertEqual(builder.segments.map(\.original), [nil])
-    }
-
-    func testDictionaryNeverShiftsTurnBoundaries() {
-        let words = dictionary("Synthetic Word Replacement", "wurd")
-        var fixed = MeetingTranscriptBuilder(), plain = MeetingTranscriptBuilder()
-        for builder in [0, 1] {
-            func update(_ source: MeetingSource, _ text: String, _ offset: TimeInterval) {
-                if builder == 0 { fixed.update(source, transcript: text, at: offset, dictionary: words) }
-                else { plain.update(source, transcript: text, at: offset) }
-            }
-            update(.you, "a wurd here", 1); update(.others, "Thanks", 2); update(.you, "a wurd here. Next wurd", 3)
-        }
-        XCTAssertEqual(fixed.segments.map(\.text), ["a Synthetic Word Replacement here", "Thanks", "Next Synthetic Word Replacement"])
-        XCTAssertEqual(fixed.segments.map { $0.original ?? $0.text }, plain.segments.map(\.text))
-        XCTAssertEqual(fixed.segments.map(\.offset), plain.segments.map(\.offset))
+        builder.update(.you, transcript: "we moved it to gi", at: 1)
+        builder.update(.others, transcript: "Okay", at: 2)
+        builder.update(.you, transcript: "we moved it to gira today", at: 3)
+        builder.update(.others, transcript: "Okay. gira board is ready", at: 4)
+        XCTAssertEqual(builder.segments.map(\.text), ["we moved it to gi", "Okay", "gira today", "gira board is ready"])
+        XCTAssertEqual(shown(builder, words), ["we moved it to gi", "Okay", "Jira today", "Jira board is ready"])
     }
 
     func testDictionaryNeverChangesPartOfAJoinedToken() {
         var builder = MeetingTranscriptBuilder()
         let words = dictionary("COM", "com")
-        builder.update(.you, transcript: "visit example", at: 1, dictionary: words)
-        builder.update(.others, transcript: "Okay", at: 2, dictionary: words)
-        builder.update(.you, transcript: "visit example.com today", at: 3, dictionary: words)
-        XCTAssertEqual(builder.segments.last?.text, "example.com today")
-        XCTAssertNil(builder.segments.last?.original)
-        builder.update(.you, transcript: "visit example.com today com", at: 4, dictionary: words)
-        XCTAssertEqual(builder.segments.last?.text, "example.com today COM")
+        builder.update(.you, transcript: "visit example", at: 1)
+        builder.update(.others, transcript: "Okay", at: 2)
+        builder.update(.you, transcript: "visit example.com today", at: 3)
+        XCTAssertEqual(shown(builder, words).last, "example.com today")
+        XCTAssertFalse(MeetingSpellings.turn(builder.segments[2], dictionary: words).changed)
+        builder.update(.you, transcript: "visit example.com today com", at: 4)
+        XCTAssertEqual(shown(builder, words).last, "example.com today COM")
     }
 
     func testPhraseSplitAcrossTurnsNeverMatches() {
         var builder = MeetingTranscriptBuilder()
         let words = dictionary("Synthetic Phrase", "synthetic phrase")
-        builder.update(.you, transcript: "a synthetic", at: 1, dictionary: words)
-        builder.update(.others, transcript: "Go on", at: 2, dictionary: words)
-        builder.update(.you, transcript: "a synthetic phrase", at: 3, dictionary: words)
-        XCTAssertEqual(builder.segments.map(\.text), ["a synthetic", "Go on", "phrase"])
-        XCTAssertEqual(builder.segments.compactMap(\.original), [])
+        builder.update(.you, transcript: "a synthetic", at: 1)
+        builder.update(.others, transcript: "Go on", at: 2)
+        builder.update(.you, transcript: "a synthetic phrase", at: 3)
+        XCTAssertEqual(shown(builder, words), ["a synthetic", "Go on", "phrase"])
+        XCTAssertEqual(MeetingSpellings.fixedTurns(in: Meeting(created: now, appName: "Zoom", segments: builder.segments), dictionary: words), 0)
+        builder.update(.you, transcript: "a synthetic phrase, a synthetic phrase", at: 4)
+        XCTAssertEqual(shown(builder, words).last, "phrase, a Synthetic Phrase")
+    }
+
+    /// One visible row's cost in a three-hour meeting, and the whole meeting's count; recorded, never gated.
+    func testReadingAThreeHourMeetingTimeIsRecorded() {
+        let entries = (0..<500).map { DictionaryEntry(heardAs: ["wurd\($0)"], writeAs: "Wurd\($0)", created: now.addingTimeInterval(Double($0))) }
+        let words = DictionaryMatcher(PersonalDictionary(entries: entries))
+        let segments = (0..<2_000).map { index in
+            MeetingSegment(source: index % 2 == 0 ? .you : .others, offset: Double(index) * 5,
+                           text: (0..<15).map { "wurd\((index * 15 + $0) % 700)" }.joined(separator: " ") + ".")
+        }
+        let meeting = Meeting(created: now, appName: "Zoom", segments: segments)
+        let expected = (0..<2_000).filter { index in (0..<15).contains { (index * 15 + $0) % 700 < 500 } }.count
+        XCTAssertEqual(MeetingSpellings.fixedTurns(in: meeting, dictionary: words), expected)
+        XCTAssertEqual(MeetingSpellings.turn(segments[1], dictionary: words).text, "Wurd15 Wurd16 Wurd17 Wurd18 Wurd19 Wurd20 Wurd21 Wurd22 Wurd23 Wurd24 Wurd25 Wurd26 Wurd27 Wurd28 Wurd29.")
+        measure {
+            _ = MeetingSpellings.turn(segments[1_000], dictionary: words)
+            _ = MeetingSpellings.fixedTurns(in: meeting, dictionary: words)
+        }
     }
 
     // MARK: Settled text

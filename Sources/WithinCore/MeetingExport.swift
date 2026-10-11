@@ -61,27 +61,46 @@ extension Meeting {
               MeetingStop.reasons.contains(reason) else { return nil }
         return MeetingStop(at: end, reason: reason)
     }
+}
 
-    /// Turns that personal dictionary fixes changed.
-    public var fixedTurns: Int { segments.filter { $0.original != nil }.count }
+/// The personal dictionary in meetings, applied to saved turns whenever a meeting is read: shown, searched or
+/// exported. A turn is stored exactly as transcribed, so its `text` is always the original transcription, and editing
+/// the dictionary changes how every meeting reads. You and Others alike, one turn at a time: a phrase split across two
+/// turns never matches. Provisional text and notes are never changed. Pass the current dictionary each time; nothing
+/// is cached.
+public enum MeetingSpellings {
+    /// One turn in your spellings, and what changed. Linear in the turn's length, so it suits each visible row.
+    public static func turn(_ segment: MeetingSegment, dictionary: DictionaryMatcher) -> DictionaryResult {
+        dictionary.apply(to: segment.text)
+    }
+
+    /// Turns the dictionary changes. Linear in the whole transcript: compute it once per meeting and dictionary.
+    public static func fixedTurns(in meeting: Meeting, dictionary: DictionaryMatcher) -> Int {
+        dictionary.isEmpty ? 0 : meeting.segments.filter { turn($0, dictionary: dictionary).changed }.count
+    }
 }
 
 public enum MeetingSearch {
-    /// Title, notes, each turn's text and its original transcription; ignores case and accents.
-    public static func matching(_ meetings: [Meeting], query: String) -> [Meeting] {
+    /// Title, notes, and each turn as transcribed or in your spellings; ignores case and accents.
+    public static func matching(_ meetings: [Meeting], query: String, dictionary: DictionaryMatcher) -> [Meeting] {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else { return meetings }
-        func found(_ text: String?) -> Bool { text?.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
+        func found(_ text: String) -> Bool { text.range(of: needle, options: [.caseInsensitive, .diacriticInsensitive]) != nil }
         return meetings.filter { meeting in
-            found(meeting.title) || found(meeting.notes) || meeting.segments.contains { found($0.text) || found($0.original) }
+            found(meeting.title) || found(meeting.notes) || meeting.segments.contains { segment in
+                if found(segment.text) { return true }
+                let spelled = MeetingSpellings.turn(segment, dictionary: dictionary)
+                return spelled.changed && found(spelled.text)
+            }
         }
     }
 }
 
-/// Markdown for a copy saved outside Within. One version of each turn: the fixed text by default,
-/// or the original transcription when asked; never both.
+/// Markdown for a copy saved outside Within. One version of each turn: your spellings from the current dictionary by
+/// default, or the original transcription when asked; never both.
 public enum MeetingExport {
-    public static func markdown(_ meeting: Meeting, useOriginalTranscription: Bool = false, timeZone: TimeZone = .current) -> String {
+    public static func markdown(_ meeting: Meeting, dictionary: DictionaryMatcher, useOriginalTranscription: Bool = false,
+                                timeZone: TimeZone = .current) -> String {
         let microphoneOnly = meeting.appName == Meeting.microphoneOnly || meeting.appName.isEmpty
         let length = meeting.stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0
         var header = [
@@ -91,7 +110,8 @@ public enum MeetingExport {
                 ? "Transcribed on this Mac by Within. \"You\" is the microphone. Labels are sources, not people."
                 : "Transcribed on this Mac by Within. \"You\" is the microphone; \"Others\" is \(meeting.appName)’s audio. Labels are sources, not people.",
         ]
-        let fixes = meeting.fixedTurns
+        let spelled = meeting.segments.map { MeetingSpellings.turn($0, dictionary: dictionary) }
+        let fixes = spelled.filter(\.changed).count
         if fixes > 0 {
             header.append(useOriginalTranscription ? "Original transcription, without personal dictionary fixes."
                 : "Personal dictionary fixes were applied in \(fixes) \(fixes == 1 ? "turn" : "turns"). The original transcription stays in Within.")
@@ -101,9 +121,9 @@ public enum MeetingExport {
         func gapLine(_ gap: MeetingGap) -> String {
             "*— \(gap.label) \(clock(gap.start))–\(clock(gap.end))\(gap.detail(appName: meeting.appName).map { " · " + $0 } ?? "") —*"
         }
-        for segment in meeting.segments {
+        for (segment, spelled) in zip(meeting.segments, spelled) {
             while let gap = gaps.first, segment.offset > gap.start { transcript.append(gapLine(gap)); gaps = gaps.dropFirst() }
-            let text = useOriginalTranscription ? segment.original ?? segment.text : segment.text
+            let text = useOriginalTranscription ? segment.text : spelled.text
             transcript.append("**[\(clock(segment.offset))] \(segment.source == .you ? "You" : "Others"):** \(text)")
         }
         transcript += gaps.map(gapLine)

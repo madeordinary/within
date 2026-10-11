@@ -9,12 +9,24 @@ public struct MeetingSegment: Codable, Equatable, Identifiable, Sendable {
     /// Meeting-relative seconds when this turn's text first settled: its stretch's start plus the
     /// time since, counted through sleep. Resume never restarts the clock.
     public let offset: TimeInterval
+    /// The original transcription: the speech model's hypothesis, not a record of what was said. The personal
+    /// dictionary is applied only when the meeting is read (`MeetingSpellings`), never stored.
     public var text: String
-    /// The transcription before personal dictionary fixes, kept only when they changed this turn.
-    /// It is the speech model's hypothesis, not a record of what was said.
-    public var original: String?
-    public init(id: UUID = UUID(), source: MeetingSource, offset: TimeInterval, text: String, original: String? = nil) {
-        self.id = id; self.source = source; self.offset = offset; self.text = text; self.original = original
+    public init(id: UUID = UUID(), source: MeetingSource, offset: TimeInterval, text: String) {
+        self.id = id; self.source = source; self.offset = offset; self.text = text
+    }
+
+    private enum EarlierKeys: String, CodingKey { case original }
+
+    /// A file from when fixes were stored may also hold `original`, the transcription before them. That is the
+    /// text kept, so the current dictionary applies to it like any other turn.
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        id = try values.decode(UUID.self, forKey: .id)
+        source = try values.decode(MeetingSource.self, forKey: .source)
+        offset = try values.decode(TimeInterval.self, forKey: .offset)
+        let stored = try values.decode(String.self, forKey: .text)
+        text = try decoder.container(keyedBy: EarlierKeys.self).decodeIfPresent(String.self, forKey: .original) ?? stored
     }
 }
 
@@ -82,11 +94,10 @@ public struct Meeting: Codable, Equatable, Identifiable, Sendable {
     public var lastCapture: Date { created.addingTimeInterval(stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0) }
 }
 
-/// Turns each stream's growing transcript into alternating, labelled turns in arrival order.
-/// The open turn is always re-derived from its stream's whole text, so updates never split words.
+/// Turns each stream's growing transcript into alternating, labelled turns in arrival order, exactly as
+/// transcribed. The open turn is always re-derived from its stream's whole text, so updates never split words,
+/// and every turn starts at a word, so the dictionary applied when a meeting is read matches each turn alone.
 public struct MeetingTranscriptBuilder: Sendable {
-    /// Owner question Q4, interim answer: personal dictionary fixes apply to You turns only.
-    public static let dictionarySources: Set<MeetingSource> = [.you]
     public private(set) var segments: [MeetingSegment]
     /// Counts gaps. An update tagged with an earlier stretch changes nothing.
     public private(set) var stretch = 0
@@ -98,36 +109,27 @@ public struct MeetingTranscriptBuilder: Sendable {
 
     public init(segments: [MeetingSegment] = []) { self.segments = segments }
 
-    /// `transcript` is the stream's whole settled (or final) text since its session began. Fixes are
-    /// applied to the turn's text only; anchors stay on the raw text, so reapplying is idempotent.
-    public mutating func update(_ source: MeetingSource, transcript: String, at offset: TimeInterval,
-                                dictionary: DictionaryMatcher = .empty, stretch: Int? = nil) {
+    /// `transcript` is the stream's whole settled (or final) text since its session began.
+    public mutating func update(_ source: MeetingSource, transcript: String, at offset: TimeInterval, stretch: Int? = nil) {
         if let stretch, stretch != self.stretch { return }
         let current = TranscriptFormatting.clean(transcript)
         latest[source] = current
-        let raw = Self.turnText(current, after: consumed[source] ?? "")
+        let text = Self.turnText(current, after: consumed[source] ?? "")
         if open == source, let last = segments.indices.last {
             // A turn whose only words were withdrawn is removed rather than left showing them.
-            guard !raw.isEmpty else { segments.removeLast(); open = nil; return }
-            (segments[last].text, segments[last].original) = Self.fixed(raw, source, dictionary)
+            guard !text.isEmpty else { segments.removeLast(); open = nil; return }
+            segments[last].text = text
             return
         }
-        guard !raw.isEmpty else { return }
+        guard !text.isEmpty else { return }
         // The other side's open turn is complete once this side speaks.
         if let other = open { consumed[other] = latest[other] ?? "" }
         open = source
-        let (text, original) = Self.fixed(raw, source, dictionary)
-        segments.append(MeetingSegment(source: source, offset: offset, text: text, original: original))
+        segments.append(MeetingSegment(source: source, offset: offset, text: text))
     }
 
     /// A pause (lock, sleep, call ended) ends every turn; resumed speech sessions start empty.
     public mutating func markGap() { latest = [:]; consumed = [:]; open = nil; stretch += 1 }
-
-    private static func fixed(_ raw: String, _ source: MeetingSource, _ dictionary: DictionaryMatcher) -> (String, String?) {
-        guard dictionarySources.contains(source) else { return (raw, nil) }
-        let result = dictionary.apply(to: raw)
-        return (result.text, result.changed ? raw : nil)
-    }
 
     /// The text after `anchor`, without the previous turn's trailing punctuation.
     static func turnText(_ current: String, after anchor: String) -> String {

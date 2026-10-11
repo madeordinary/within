@@ -112,9 +112,14 @@ import WithinCore
         }
         let sources: [MeetingAudioSource] = [you, others]
         let controller = MeetingController(speech: speech, host: host, store: store, sources: { app in app == nil ? [you] : sources })
+        host.controller = controller
+        // Zoom when the scripted Others source keeps delivering silent frames, as the live probe saw Zoom's tap do, so
+        // the controller runs the rules that need them; the tap and a script without them keep an app whose rules are off.
+        let app = !tap && script.othersDeliversSilence ? MeetingApp.zoom : MeetingApp(name: "Synthetic app", bundlePrefixes: [])
         report["sourceTypes"] = sources.map { String(describing: type(of: $0)) }
         report["othersDeliversSilence"] = script.othersDeliversSilence
-        return Session(script: script, speech: speech, host: host, you: you, others: others, controller: controller)
+        report["othersLivenessRules"] = MeetingHealthMonitor.deliversSilence(for: app)
+        return Session(script: script, speech: speech, host: host, you: you, others: others, controller: controller, app: app)
     }
 
     /// Others through a muted tap of `afplay` playing the Others track. Fixture only; asks for System Audio Recording.
@@ -133,8 +138,6 @@ import WithinCore
         return source
     }
 
-    private let app = MeetingApp(name: "Synthetic app", bundlePrefixes: [])
-
     // MARK: run
 
     /// Start, lock at 20 s of script, resume with acknowledgment, a forced overflow, resume, a forced rollover,
@@ -146,14 +149,18 @@ import WithinCore
         monitor.start()
         var checks: [String: Bool] = [:]
         checks["stagingSweptBeforeFirstWrite"] = report["stagingSweptBeforeFirstWrite"] as? Bool ?? false
-        let controller = session.controller
+        let controller = session.controller, app = session.app
         checks["started"] = controller.start(app: app, acknowledged: true)
         checks["live"] = await waitUntil(90) { controller.phase == .recording }
+        // The health monitor of each stretch follows the meeting's app, checked at the first stretch and the last.
+        var livenessRulesFollowTheApp = controller.othersLivenessRules == MeetingHealthMonitor.deliversSilence(for: app)
+        var refusedMicrophoneOnly: Bool?
         var survivors: [[MeetingSegment]] = []
         func pausedAndKept(_ timeout: Double, stretches: Int) async -> Bool {
             let paused = await waitUntil(timeout) { controller.phase == .paused && controller.meeting?.stretches.count == stretches }
             survivors.append(controller.meeting?.segments ?? [])
-            let idle = await waitUntil(30) { session.host.idle }
+            // The pause's own save and unload come after the phase changes, so wait for them before resuming.
+            let idle = await waitUntil(30) { !controller.hasUnsavedWork && session.host.idle }
             return paused && idle
         }
         if tap {
@@ -162,6 +169,7 @@ import WithinCore
             checks["lockedAt20s"] = await waitUntil(60) { session.youSeconds >= 20 }
             controller.boundary(.lockOrSleep)
             checks["pausedForLock"] = await pausedAndKept(60, stretches: 1)
+            refusedMicrophoneOnly = !controller.resume(acknowledged: false, microphoneOnly: true) && controller.refusal == MeetingController.acknowledgmentMessage
             checks["resumeAfterLockNeedsAcknowledgment"] = !controller.resume(acknowledged: false) && controller.refusal == MeetingController.acknowledgmentMessage
             session.overrideLimits(CaptureLimits(totalSeconds: CaptureLimits.meeting.totalSeconds, backlogSeconds: 0.05))
             checks["resumedWithAcknowledgment"] = controller.resume(acknowledged: true)
@@ -174,6 +182,8 @@ import WithinCore
             report["rolloverAudioSeconds"] = rolloverAudio
             checks["reachedFinishPoint"] = await waitUntil(seconds + 60) { session.youSeconds >= self.seconds }
         }
+        livenessRulesFollowTheApp = livenessRulesFollowTheApp && controller.othersLivenessRules == MeetingHealthMonitor.deliversSilence(for: app)
+        checks["othersLivenessRulesFollowTheApp"] = livenessRulesFollowTheApp
         let finished = await controller.finish()
         checks["finishSaved"] = finished
         checks["noticeClearedByFinish"] = controller.notice == nil
@@ -182,6 +192,10 @@ import WithinCore
         guard let meeting = controller.meeting else { report["checks"] = checks; return false }
         let expected: [MeetingStretchEnd] = tap ? [.finished] : [.lockOrSleep, .processingFellBehind, .durationLimit, .finished]
         checks["stretchEnds"] = meeting.stretches.map(\.ended) == expected
+        if let refusedMicrophoneOnly {
+            // A microphone-only resume the lifecycle refuses leaves the app's sound in every later stretch.
+            checks["refusedMicrophoneOnlyResumeKeptTheAppSound"] = refusedMicrophoneOnly && meeting.stretches.allSatisfy { $0.sources.contains(.others) }
+        }
         checks["textSurvivedEachPause"] = survivors.allSatisfy { kept in
             kept.allSatisfy { old in meeting.segments.contains { $0.id == old.id && $0.source == old.source && $0.text.hasPrefix(old.text) } }
         }
@@ -225,6 +239,7 @@ import WithinCore
             // The controller holds its host weakly, as AppModel's owner holds it.
             let spareHost = FixtureHost(speech: spare, directory: modelDirectory, manifest: try loadManifest())
             let preparing = MeetingController(speech: spare, host: spareHost, store: store, sources: { _ in [] })
+            spareHost.controller = preparing
             checks["shutdownWhilePreparingStarted"] = preparing.start(app: nil, acknowledged: true) && preparing.phase == .preparing
             let unsaved = preparing.meeting?.id
             checks["shutdownWhilePreparingDeletes"] = unsaved != nil && preparing.emergencyStop() && !exists(unsaved)
@@ -253,7 +268,7 @@ import WithinCore
         let session = try session()
         let monitor = DiskMonitor(store: store, session: session, fixture: self)
         monitor.start()
-        let controller = session.controller
+        let controller = session.controller, app = session.app
         var checks: [String: Bool] = [:]
         checks["started"] = controller.start(app: app, acknowledged: true)
         checks["live"] = await waitUntil(90) { controller.phase == .recording }
@@ -328,6 +343,7 @@ import WithinCore
             let you = FixtureSource(source: .you, track: script.track(.you), sampleRate: script.rate)
             let others = FixtureSource(source: .others, track: script.track(.others), sampleRate: script.rate)
             let controller = MeetingController(speech: speech, host: host, store: store, sources: { _ in [you, others] })
+            host.controller = controller
             checks["recoveredShown"] = controller.show(recovered) && controller.meeting == recovered
             try? await Task.sleep(for: MeetingController.checkpointDeadline + .seconds(1))
             checks["recoveredStaysFinished"] = controller.phase == .finished && !controller.isOpen && !controller.isCapturing
@@ -350,7 +366,7 @@ import WithinCore
         let session = try session()
         let monitor = DiskMonitor(store: store, session: session, fixture: self)
         monitor.start()
-        let controller = session.controller
+        let controller = session.controller, app = session.app
         var checks: [String: Bool] = [:]
         checks["started"] = controller.start(app: app, acknowledged: true)
         checks["live"] = await waitUntil(90) { controller.phase == .recording }
@@ -471,7 +487,6 @@ import WithinCore
         checks["segmentsInsideStretches"] = meeting.segments.allSatisfy { segment in
             meeting.stretches.contains { segment.offset >= $0.start && segment.offset <= ($0.end ?? .infinity) }
         }
-        checks["noFixesOnOthers"] = !meeting.segments.contains { $0.source == .others && $0.original != nil }
         let phrases = session.script.phraseReport(meeting)
         report["turns"] = phrases.turns
         if !phrases.turns.isEmpty {
@@ -490,6 +505,12 @@ import WithinCore
         report["footprintMBEvery5s"] = monitor.footprints
         report["checkpointsWritten"] = session.controller.checkpointsWritten
         let file = store.directory.appendingPathComponent("\(meeting.id.uuidString).json")
+        // Each saved turn has one text and no second copy. That the text is the raw transcription is covered by
+        // WithinCoreTests; this fixture's host dictionary is empty.
+        let stored = (try? Data(contentsOf: file)).flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let storedTurns = stored?["segments"] as? [[String: Any]]
+        checks["segmentKeysAreIdSourceOffsetText"] = storedTurns?.count == meeting.segments.count
+            && storedTurns?.allSatisfy { Set($0.keys) == ["id", "source", "offset", "text"] } == true
         let fileMode = (try? FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? Int) ?? -1
         let folderMode = (try? FileManager.default.attributesOfItem(atPath: store.directory.path)[.posixPermissions] as? Int) ?? -1
         report["fileMode"] = String(fileMode, radix: 8); report["folderMode"] = String(folderMode, radix: 8)
@@ -586,6 +607,7 @@ private final class FixtureCounter: @unchecked Sendable {
     let you: FixtureSource
     let others: MeetingAudioSource
     let controller: MeetingController
+    let app: MeetingApp
     var youSeconds: Double { you.seconds }
     var othersSeconds: Double { (others as? FixtureSource)?.seconds ?? you.seconds }
     func overrideLimits(_ limits: CaptureLimits) {
@@ -603,6 +625,7 @@ private final class FixtureCounter: @unchecked Sendable {
     private var session = SessionState()
     private var unloadAfterSession = false, unloading = false
     private(set) var claims = 0, unloads = 0
+    weak var controller: MeetingController?
     private(set) var announcedNotSaved = false
 
     init(speech: LocalSpeech, directory: URL, manifest: ModelManifest) { self.speech = speech; self.directory = directory; modelManifest = manifest }
@@ -627,7 +650,8 @@ private final class FixtureCounter: @unchecked Sendable {
         if unloadAfterSession { unloadAfterSession = false; await unload() }
     }
     func requestUnload() {
-        guard session.phase == .ready else { unloadAfterSession = true; return }
+        // As in AppModel, a meeting already starting again keeps the models until its session ends.
+        guard session.phase == .ready, controller?.isCapturing != true else { unloadAfterSession = true; return }
         unloading = true
         Task { await unload() }
     }

@@ -4,13 +4,13 @@ import WithinCore
 /// Saved documents (notes, meetings): text only, one per file, sorted by last change.
 protocol LocalDocument: Codable, Equatable, Identifiable where ID == UUID {
     var modified: Date { get }
-    /// Whether every store of this kind keeps its folder out of Time Machine, however it was built.
+    /// Whether a store of this kind keeps its folder out of Time Machine unless it is built otherwise.
     static var excludedFromBackup: Bool { get }
 }
 /// Notes are deliberate documents, so they stay in backups.
 extension Note: LocalDocument { static let excludedFromBackup = false }
-/// Meetings hold other people's words, and backed-up copies can't be recalled: out of backups until the
-/// owner decides otherwise (Q2).
+/// Meetings hold other people's words, and backed-up copies can't be recalled: out of backups unless the user
+/// turns backups on (owner answer to Q2: a switch, off by default).
 extension Meeting: LocalDocument { static let excludedFromBackup = true }
 
 typealias NotesStore = LocalDocumentStore<Note>
@@ -21,6 +21,13 @@ typealias MeetingStore = LocalDocumentStore<Meeting>
 /// secure erase of the disk.
 struct LocalDocumentStore<Document: LocalDocument> {
     let directory: URL
+    /// Whether this store keeps its folder out of Time Machine: set when the folder is created, and changed on an
+    /// existing folder only by `applyBackupChoice()`, so a store built with an older choice never undoes a newer one.
+    let excludedFromBackup: Bool
+
+    init(directory: URL, excludedFromBackup: Bool = Document.excludedFromBackup) {
+        self.directory = directory; self.excludedFromBackup = excludedFromBackup
+    }
 
     private func file(for id: UUID) -> URL { directory.appendingPathComponent("\(id.uuidString).json") }
     private static func isStaging(_ name: String) -> Bool { name.hasPrefix(".") && name.hasSuffix(".tmp") }
@@ -41,15 +48,27 @@ struct LocalDocumentStore<Document: LocalDocument> {
         return (documents.sorted { $0.modified > $1.modified }, unreadable, false)
     }
 
-    /// The owner-only folder, already out of backups when its kind of document is.
+    /// The owner-only folder. One this call creates (mkdir(2) says so) is out of backups, when the store excludes
+    /// them, before anything else is done to it; if that can't be set, the still-empty folder is removed so the next
+    /// save tries again. A folder made elsewhere keeps the backup choice it has.
     func prepareDirectory() throws {
         let manager = FileManager.default
+        try manager.createDirectory(at: directory.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                    attributes: [.posixPermissions: 0o700])
+        let created = mkdir(directory.path, 0o700) == 0, failure = errno
+        guard created || failure == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO) }
+        if created, excludedFromBackup {
+            do { try Self.setExcludedFromBackup(true, directory) } catch { rmdir(directory.path); throw error }
+        }
+        // Throws when the name belongs to something other than a folder.
         try manager.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
-        guard Document.excludedFromBackup else { return }
-        var folder = directory
-        var values = URLResourceValues(); values.isExcludedFromBackup = true
-        try folder.setResourceValues(values)
+    }
+
+    private static func setExcludedFromBackup(_ excluded: Bool, _ url: URL) throws {
+        var item = url
+        var values = URLResourceValues(); values.isExcludedFromBackup = excluded
+        try item.setResourceValues(values)
     }
 
     func save(_ note: Document) throws {
@@ -81,7 +100,9 @@ struct LocalDocumentStore<Document: LocalDocument> {
 extension LocalDocumentStore where Document == Meeting {
     /// The meetings folder under `base`. The `.noindex` name is meant to keep Spotlight out; that is
     /// unverified until the owner's Spotlight check.
-    init(meetingsIn base: URL) { self.init(directory: base.appendingPathComponent("Meetings.noindex", isDirectory: true)) }
+    init(meetingsIn base: URL, excludedFromBackup: Bool = Meeting.excludedFromBackup) {
+        self.init(directory: base.appendingPathComponent("Meetings.noindex", isDirectory: true), excludedFromBackup: excludedFromBackup)
+    }
 
     var exists: Bool {
         var folder: ObjCBool = false
@@ -93,6 +114,23 @@ extension LocalDocumentStore where Document == Meeting {
     var fileCount: Int? {
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return exists ? nil : 0 }
         return names.filter { $0.hasSuffix(".json") && !$0.hasPrefix(".") }.count
+    }
+
+    /// Applies this store's backup choice to the folder that exists, creating nothing and returning false without one.
+    /// The exclusion is written only when a folder is created, so call this at every launch while the folder exists.
+    /// Including also clears any exclusion a meeting file carries of its own (Within never sets one), so every meeting
+    /// reaches backups. A file that can't be changed doesn't stop the rest; the first failure is thrown once all were
+    /// tried.
+    @discardableResult func applyBackupChoice() throws -> Bool {
+        guard exists else { return false }
+        try Self.setExcludedFromBackup(excludedFromBackup, directory)
+        guard !excludedFromBackup else { return true }
+        var failure: Error?
+        for name in try FileManager.default.contentsOfDirectory(atPath: directory.path) where name.hasSuffix(".json") && !name.hasPrefix(".") {
+            do { try Self.setExcludedFromBackup(false, directory.appendingPathComponent(name)) } catch { failure = failure ?? error }
+        }
+        if let failure { throw failure }
+        return true
     }
 
     /// Delete all: every meeting file, including ones that couldn't be read, and crash leftovers. The folder stays.

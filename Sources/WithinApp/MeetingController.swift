@@ -7,7 +7,8 @@ import WithinCore
     var microphoneUID: String { get }
     /// Read without prompting.
     var microphoneAuthorized: Bool { get }
-    /// Snapshotted when each stretch starts and applied to You turns only.
+    /// The current dictionary, applied to saved turns, You and Others alike, whenever a meeting is shown, searched or
+    /// exported. Turns are stored exactly as transcribed, and provisional text is always shown raw.
     var dictionaryMatcher: DictionaryMatcher { get }
     var modelManifest: ModelManifest { get }
     func modelDirectory() async -> URL
@@ -107,12 +108,16 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     let preview: Bool
     private(set) var checkpointsWritten = 0
     private(set) var checkpointFailures = 0
+    /// Whether the latest stretch's health monitor runs the Others first-audio and stall rules.
+    private(set) var othersLivenessRules = false
     private var lifecycle = MeetingLifecycle()
     private let speech: LocalSpeech?
     private weak var host: MeetingHost?
     private let writer: MeetingCheckpointWriter?
     private let makeSources: MeetingSourceFactory
     private var sources: [MeetingAudioSource] = []
+    /// The app whose sound the current sources include; it decides the Others liveness rules.
+    private var app: MeetingApp?
     private var builder = MeetingTranscriptBuilder()
     private var clock = MeetingClock()
     private let origin = ContinuousClock.now
@@ -185,6 +190,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         guard !preview, let host, lifecycle.phase == .finished, meeting != nil, quiescent else { return false }
         if let reason = host.meetingStartRefusal() { refuse(reason); return false }
         guard acknowledged else { refuse(Self.acknowledgmentMessage); return false }
+        self.app = app
         replaceSources(makeSources(app))
         refusal = nil; notice = nil
         return send(.start(acknowledged: true))
@@ -200,7 +206,9 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     @discardableResult func resume(acknowledged: Bool, microphoneOnly: Bool = false) -> Bool {
         guard !preview, let host, lifecycle.phase == .paused else { return false }
         if let reason = host.meetingStartRefusal() { refuse(reason); return false }
-        if microphoneOnly { replaceSources(sources.filter { $0.source == .you }) }
+        // Refused before anything changes, so a refused microphone-only resume keeps the app's sound.
+        guard acknowledged || !lifecycle.needsAcknowledgment(at: Date()) else { refuse(Self.acknowledgmentMessage); return false }
+        if microphoneOnly { app = nil; replaceSources(sources.filter { $0.source == .you }) }
         refusal = nil; notice = nil
         return send(.resume(acknowledged: acknowledged))
     }
@@ -368,6 +376,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         clock = MeetingClock()
         notSaved = false; deletionPending = false; notice = nil; provisional = [:]; levels = [:]
         elapsed = meeting?.stretches.last.map { $0.end ?? $0.lastCheckpoint } ?? 0
+        self.app = finished ? nil : app
         replaceSources(finished ? [] : makeSources(app))
     }
 
@@ -509,8 +518,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         changed()
         guard let session = host.claimCapture() else { send(.startFailed(.speechError, generation: generation)); return }
         stretchSerial += 1
-        let run = StretchRun(serial: stretchSerial, generation: generation, session: session, matcher: host.dictionaryMatcher,
-                             segmentsAtStart: builder.segments.count)
+        let run = StretchRun(serial: stretchSerial, generation: generation, session: session, segmentsAtStart: builder.segments.count)
         self.run = run
         run.task = Task { @MainActor [weak self] in await self?.runStretch(run) }
     }
@@ -645,7 +653,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         guard text != run.fed[source, default: ""] else { return }
         run.fed[source] = text
         let offset = MeetingClock.textOffset(clock.offset(at: monotonic()) ?? 0, stretchEnd: stretchEnd, lastSegment: builder.segments.last?.offset)
-        builder.update(source, transcript: text, at: offset, dictionary: run.matcher)
+        builder.update(source, transcript: text, at: offset)
         guard meeting?.segments != builder.segments else { return }
         meeting?.segments = builder.segments
         changed()
@@ -653,8 +661,10 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
 
     /// Every 100 ms while recording: levels, elapsed time, settling without new audio, and the health rules.
     private func startPulse(_ run: StretchRun) {
+        let othersDeliversSilence = MeetingHealthMonitor.deliversSilence(for: app)
+        othersLivenessRules = othersDeliversSilence
         run.pulse = Task { @MainActor [weak self] in
-            var monitor = MeetingHealthMonitor()
+            var monitor = MeetingHealthMonitor(othersDeliversSilence: othersDeliversSilence)
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(100))
                 guard let self, self.run === run, !run.stopped, self.lifecycle.phase == .recording, let host = self.host else { return }
@@ -833,7 +843,6 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     let serial: Int
     let beginGeneration: Int
     let session: UUID
-    let matcher: DictionaryMatcher
     let segmentsAtStart: Int
     var task: Task<Void, Never>?
     var pulse: Task<Void, Never>?
@@ -852,8 +861,8 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     private(set) var drainGeneration: Int?
     private var drainWaiters: [CheckedContinuation<Int, Never>] = []
 
-    init(serial: Int, generation: Int, session: UUID, matcher: DictionaryMatcher, segmentsAtStart: Int) {
-        self.serial = serial; beginGeneration = generation; self.session = session; self.matcher = matcher; self.segmentsAtStart = segmentsAtStart
+    init(serial: Int, generation: Int, session: UUID, segmentsAtStart: Int) {
+        self.serial = serial; beginGeneration = generation; self.session = session; self.segmentsAtStart = segmentsAtStart
     }
 
     func requestDrain(_ generation: Int) {

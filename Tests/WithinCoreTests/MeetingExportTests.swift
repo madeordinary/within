@@ -4,12 +4,16 @@ import XCTest
 final class MeetingExportTests: XCTestCase {
     private let now = Date(timeIntervalSince1970: 1_800_000_000)
     private let utc = TimeZone(identifier: "UTC")!
+    private var words: DictionaryMatcher {
+        DictionaryMatcher(PersonalDictionary(entries: [DictionaryEntry(heardAs: ["gira"], writeAs: "Jira", created: now),
+                                                       DictionaryEntry(heardAs: ["shivon"], writeAs: "Siobhan", created: now.addingTimeInterval(1))]))
+    }
 
     private var weeklySync: Meeting {
         Meeting(title: "Weekly sync", created: now, appName: "Zoom",
                 segments: [MeetingSegment(source: .others, offset: 12, text: "Thanks for joining everyone."),
                            MeetingSegment(source: .you, offset: 20, text: "Happy to be here."),
-                           MeetingSegment(source: .you, offset: 2830, text: "Back again with Jira.", original: "Back again with gira.")],
+                           MeetingSegment(source: .you, offset: 2830, text: "Back again with gira.")],
                 notes: "Typed *line*\n# not a heading",
                 stretches: [MeetingStretch(start: 0, sources: [.you, .others], end: 2710, ended: .lockOrSleep),
                             MeetingStretch(start: 2822, sources: [.you, .others], end: 4324, ended: .finished)],
@@ -41,7 +45,7 @@ final class MeetingExportTests: XCTestCase {
     // MARK: Markdown
 
     func testMarkdownHasHeaderLabelsTimestampsGapsAndNotesVerbatim() {
-        XCTAssertEqual(MeetingExport.markdown(weeklySync, timeZone: utc), """
+        XCTAssertEqual(MeetingExport.markdown(weeklySync, dictionary: words, timeZone: utc), """
             # Weekly sync
 
             2027-01-15 08:00 · Zoom · 1:12:04
@@ -69,17 +73,42 @@ final class MeetingExportTests: XCTestCase {
     }
 
     func testDefaultExportNeverContainsTheOriginalTranscription() {
-        let markdown = MeetingExport.markdown(weeklySync, timeZone: utc)
+        let markdown = MeetingExport.markdown(weeklySync, dictionary: words, timeZone: utc)
         XCTAssertFalse(markdown.contains("gira"))
         XCTAssertTrue(markdown.contains("Back again with Jira."))
     }
 
     func testOriginalTranscriptionExportIsOptInAndHasOnlyThatVersion() {
-        let markdown = MeetingExport.markdown(weeklySync, useOriginalTranscription: true, timeZone: utc)
+        let markdown = MeetingExport.markdown(weeklySync, dictionary: words, useOriginalTranscription: true, timeZone: utc)
         XCTAssertTrue(markdown.contains("Original transcription, without personal dictionary fixes."))
         XCTAssertTrue(markdown.contains("**[00:47:10] You:** Back again with gira."))
         XCTAssertFalse(markdown.contains("Jira"))
         XCTAssertFalse(markdown.contains("fixes were applied"))
+    }
+
+    func testExportFixesOthersTurnsAndCountsWithTheCurrentDictionary() {
+        var meeting = weeklySync
+        meeting.segments.insert(MeetingSegment(source: .others, offset: 2840, text: "Ask shivon about gira."), at: 3)
+        let markdown = MeetingExport.markdown(meeting, dictionary: words, timeZone: utc)
+        XCTAssertTrue(markdown.contains("Personal dictionary fixes were applied in 2 turns. The original transcription stays in Within."))
+        XCTAssertTrue(markdown.contains("**[00:47:20] Others:** Ask Siobhan about Jira."))
+        let edited = DictionaryMatcher(PersonalDictionary(entries: [DictionaryEntry(heardAs: ["shivon"], writeAs: "Siobhan", created: now)]))
+        let later = MeetingExport.markdown(meeting, dictionary: edited, timeZone: utc)
+        XCTAssertTrue(later.contains("Personal dictionary fixes were applied in 1 turn."))
+        XCTAssertTrue(later.contains("**[00:47:10] You:** Back again with gira."))
+        XCTAssertTrue(later.contains("**[00:47:20] Others:** Ask Siobhan about gira."))
+        let original = MeetingExport.markdown(meeting, dictionary: words, useOriginalTranscription: true, timeZone: utc)
+        XCTAssertTrue(original.contains("**[00:47:20] Others:** Ask shivon about gira."))
+        XCTAssertFalse(original.contains("Siobhan") || original.contains("Jira"))
+    }
+
+    func testEmptyDictionaryExportIsTheTranscriptionWithoutADictionaryLine() {
+        let plain = MeetingExport.markdown(weeklySync, dictionary: .empty, timeZone: utc)
+        XCTAssertEqual(plain, MeetingExport.markdown(weeklySync, dictionary: .empty, useOriginalTranscription: true, timeZone: utc))
+        XCTAssertEqual(plain, MeetingExport.markdown(weeklySync, dictionary: words, useOriginalTranscription: true, timeZone: utc)
+            .replacingOccurrences(of: "Original transcription, without personal dictionary fixes.\n\n", with: ""))
+        XCTAssertFalse(plain.contains("dictionary"))
+        XCTAssertTrue(plain.contains("**[00:47:10] You:** Back again with gira."))
     }
 
     func testMicrophoneOnlyExportWithoutFixesOrNotes() {
@@ -88,7 +117,7 @@ final class MeetingExportTests: XCTestCase {
                               stretches: [MeetingStretch(start: 0, sources: [.you], end: 100, ended: .pauseButton),
                                           MeetingStretch(start: 3_700, sources: [.you], end: 3_800, ended: .microphoneLost),
                                           MeetingStretch(start: 3_900, sources: [.you], end: 3_950, ended: .finished)])
-        XCTAssertEqual(MeetingExport.markdown(meeting, timeZone: utc), """
+        XCTAssertEqual(MeetingExport.markdown(meeting, dictionary: .empty, timeZone: utc), """
             # Meeting
 
             2027-01-15 08:00 · Microphone only · 1:05:50
@@ -111,7 +140,7 @@ final class MeetingExportTests: XCTestCase {
                            stretches: [MeetingStretch(start: 0, sources: [.you, .others], end: 60, ended: .quitBeforeDrain)], state: .finished)
         XCTAssertEqual(quit.gaps, [])
         XCTAssertEqual(quit.stop, MeetingStop(at: 60, reason: .quitBeforeDrain))
-        XCTAssertTrue(MeetingExport.markdown(quit, timeZone: utc).hasSuffix("""
+        XCTAssertTrue(MeetingExport.markdown(quit, dictionary: .empty, timeZone: utc).hasSuffix("""
             **[00:00:10] You:** Last words
 
             *— Stopped at 00:01:00 · Within quit before the last seconds were transcribed —*
@@ -123,7 +152,7 @@ final class MeetingExportTests: XCTestCase {
         let crashed = Meeting(created: now, appName: Meeting.microphoneOnly, segments: [MeetingSegment(source: .you, offset: 10, text: "Before")], stretches: [open])
         let recovered = try XCTUnwrap(MeetingRecovery.recover([crashed]).recovered.first)
         XCTAssertEqual(recovered.stop, MeetingStop(at: 50, reason: .unexpectedExit))
-        XCTAssertTrue(MeetingExport.markdown(recovered, timeZone: utc).contains("*— Stopped at 00:00:50 · Within closed unexpectedly; the last words may be missing —*"))
+        XCTAssertTrue(MeetingExport.markdown(recovered, dictionary: .empty, timeZone: utc).contains("*— Stopped at 00:00:50 · Within closed unexpectedly; the last words may be missing —*"))
 
         var speechError = quit
         speechError.stretches = [MeetingStretch(start: 0, sources: [.you], end: 40, ended: .speechError)]
@@ -140,7 +169,7 @@ final class MeetingExportTests: XCTestCase {
         for reason in MeetingStretchEnd.allCases {
             let finished = Meeting(created: now, appName: "Zoom", stretches: [MeetingStretch(start: 0, sources: [.you], end: 60, ended: reason)], state: .finished)
             XCTAssertEqual(finished.stop != nil, [.quitBeforeDrain, .unexpectedExit, .speechError].contains(reason), "\(reason)")
-            XCTAssertFalse(MeetingExport.markdown(finished, timeZone: utc).contains("Paused"), "\(reason)")
+            XCTAssertFalse(MeetingExport.markdown(finished, dictionary: .empty, timeZone: utc).contains("Paused"), "\(reason)")
         }
     }
 
@@ -157,16 +186,20 @@ final class MeetingExportTests: XCTestCase {
 
     // MARK: Search
 
-    func testSearchMatchesTitleNotesTextAndOriginalIgnoringCaseAndAccents() {
+    func testSearchMatchesTitleNotesAndEitherSpellingIgnoringCaseAndAccents() {
+        let others = Meeting(title: "Standup", created: now, appName: "Zoom", segments: [MeetingSegment(source: .others, offset: 1, text: "Ask shivon first.")])
         let meetings = [weeklySync, Meeting(title: "Café plan", created: now, appName: "Zoom"),
-                        Meeting(created: now, appName: "Zoom", notes: "Errands")]
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "cafe").map(\.title), ["Café plan"])
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "ERRANDS").count, 1)
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "happy to").map(\.title), ["Weekly sync"])
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "gira").map(\.title), ["Weekly sync"])
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "jira").map(\.title), ["Weekly sync"])
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: " ").count, 3)
-        XCTAssertEqual(MeetingSearch.matching(meetings, query: "absent").count, 0)
+                        Meeting(created: now, appName: "Zoom", notes: "Errands"), others]
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "cafe", dictionary: words).map(\.title), ["Café plan"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "ERRANDS", dictionary: words).count, 1)
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "happy to", dictionary: words).map(\.title), ["Weekly sync"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "gira", dictionary: words).map(\.title), ["Weekly sync"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "with jira", dictionary: words).map(\.title), ["Weekly sync"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "SIOBHÁN", dictionary: words).map(\.title), ["Standup"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "shivon", dictionary: words).map(\.title), ["Standup"])
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "jira", dictionary: .empty).count, 0)
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: " ", dictionary: words).count, 4)
+        XCTAssertEqual(MeetingSearch.matching(meetings, query: "absent", dictionary: words).count, 0)
     }
 
     // MARK: Recovery

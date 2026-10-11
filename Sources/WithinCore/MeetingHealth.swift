@@ -31,8 +31,8 @@ public struct MeetingHealthMonitor: Sendable {
     public static let quietSeconds: TimeInterval = 30
     /// RMS below which the other side counts as quiet, near the probes' silent mean energy (2e-7). UNVERIFIED on real calls.
     public static let quietLevel: Float = 0.0005
-    /// Whether the tap delivers frames while the app is silent (UNVERIFIED until the live probe). Until it
-    /// does, the Others first-audio and stall rules stay off and only the tap's listeners report a loss.
+    /// Whether the app's tap keeps delivering frames while the call is silent, which the Others first-audio and
+    /// stall rules need; without it only the tap's listeners report a loss. See `deliversSilence(for:)`.
     public let othersDeliversSilence: Bool
     private var lastCount: [MeetingSource: UInt64] = [:]
     private var lastProgress: [MeetingSource: TimeInterval] = [:]
@@ -40,6 +40,11 @@ public struct MeetingHealthMonitor: Sendable {
     private var othersQuiet = false
 
     public init(othersDeliversSilence: Bool = false) { self.othersDeliversSilence = othersDeliversSilence }
+
+    /// Zoom only. The live probe (2026-10-11: Zoom 7.2.2 on macOS 27.0.1, one Mac and one output device) saw its tap
+    /// deliver zero-filled frames through a silent call, never a callback without frames. Every other app is
+    /// UNVERIFIED and keeps the rules off, as does a meeting without an app's sound.
+    public static func deliversSilence(for app: MeetingApp?) -> Bool { app == .zoom }
 
     /// `elapsed` counts from the stretch's start; `others` is nil without the app's sound.
     public mutating func poll(elapsed: TimeInterval, you: MeetingRingReading, others: MeetingRingReading?, microphoneAuthorized: Bool) -> [MeetingHealthVerdict] {

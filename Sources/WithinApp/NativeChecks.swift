@@ -353,7 +353,7 @@ func nativeChecks(to output: URL) throws {
     let meetingsFolder = meetingStore.directory
     var fixtureMeeting = Meeting(title: "Synthetic", created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
         segments: [MeetingSegment(source: .others, offset: 2, text: "synthetic meeting words"),
-                   MeetingSegment(source: .you, offset: 5, text: "Synthetic reply", original: "synthetic wurd reply")],
+                   MeetingSegment(source: .you, offset: 5, text: "synthetic wurd reply")],
         notes: "synthetic notes", stretches: [MeetingStretch(start: 0, sources: [.you, .others])])
     let meetingsFolderAbsent = !FileManager.default.fileExists(atPath: meetingsFolder.path)
     var checkpoints = MeetingCheckpointGate()
@@ -384,6 +384,35 @@ func nativeChecks(to output: URL) throws {
     // Backup exclusion belongs to the kind of document: notes stay in backups.
     let meetingsStorePassed = meetingsExcludedFirst && meetingOwnerOnly && meetingReloaded && unlistableReported && meetingNotResurrected
         && !Note.excludedFromBackup && notesInBackups
+    // The meetings backup choice, in temporary folders: out of backups from the first save by default; a store that
+    // includes them leaves its new folder in; a choice applied to an existing folder sets or clears it, and clears a
+    // file's own exclusion when including; a store built with an older choice never undoes it; no folder, nothing made.
+    func inBackups(_ url: URL) -> Bool {
+        var fresh = URL(fileURLWithPath: url.path); fresh.removeAllCachedResourceValues()
+        return (try? fresh.resourceValues(forKeys: [.isExcludedFromBackupKey]).isExcludedFromBackup) == false
+    }
+    let choiceBase = meetingsBase.appendingPathComponent("Choice", isDirectory: true)
+    let defaultChoice = MeetingStore(meetingsIn: choiceBase.appendingPathComponent("Default", isDirectory: true))
+    try defaultChoice.save(fixtureMeeting)
+    let choiceFile = defaultChoice.directory.appendingPathComponent(meetingFile.lastPathComponent)
+    let excludedByDefault = defaultChoice.excludedFromBackup && !inBackups(defaultChoice.directory) && !inBackups(choiceFile)
+    let includedChoice = MeetingStore(meetingsIn: choiceBase.appendingPathComponent("Included", isDirectory: true), excludedFromBackup: false)
+    try includedChoice.save(fixtureMeeting)
+    let includedFromFirstSave = inBackups(includedChoice.directory) && inBackups(includedChoice.directory.appendingPathComponent(meetingFile.lastPathComponent))
+    let including = MeetingStore(directory: defaultChoice.directory, excludedFromBackup: false)
+    let included = try including.applyBackupChoice() && inBackups(defaultChoice.directory) && inBackups(choiceFile)
+    try defaultChoice.save(fixtureMeeting)
+    let olderChoiceKept = inBackups(defaultChoice.directory) && names(defaultChoice.directory) == [meetingFile.lastPathComponent]
+    let excludedAgain = try defaultChoice.applyBackupChoice() && !inBackups(defaultChoice.directory) && !inBackups(choiceFile)
+    var ownExclusion = choiceFile
+    var excludedValue = URLResourceValues(); excludedValue.isExcludedFromBackup = true
+    try ownExclusion.setResourceValues(excludedValue)
+    let ownExclusionCleared = try including.applyBackupChoice() && inBackups(defaultChoice.directory) && inBackups(choiceFile)
+    let absentBase = choiceBase.appendingPathComponent("Absent", isDirectory: true)
+    let absentLeftAlone = try !MeetingStore(meetingsIn: absentBase, excludedFromBackup: false).applyBackupChoice()
+        && !MeetingStore(meetingsIn: absentBase).applyBackupChoice() && !FileManager.default.fileExists(atPath: absentBase.path)
+    let meetingsBackupChoicePassed = excludedByDefault && includedFromFirstSave && included && olderChoiceKept && excludedAgain
+        && ownExclusionCleared && absentLeftAlone && notesInBackups && !Note.excludedFromBackup
     // A preview meeting controller reports the phase `configurePreview` gave it, and never starts anything.
     let previewMeetings = MeetingController(preview: true)
     let previewMeeting = Meeting(title: "Synthetic", created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
@@ -758,6 +787,7 @@ func nativeChecks(to output: URL) throws {
         "meetingStartRefusalNamesBlockerPassed": meetingStartRefusalsPassed,
         "meetingsDefaultOffLeavesStatesUnchangedPassed": meetingsDefaultOffPassed,
         "meetingUpkeepExistingFolderOnlyPassed": meetingUpkeepPassed,
+        "meetingsBackupChoicePassed": meetingsBackupChoicePassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -767,7 +797,7 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"],
         "meetingsNotTested": ["a meeting started in the app (this build has no path that starts one)", "Finish and Quit with terminateLater and the 10-second watchdog",
             "the save-failure quit alert", "logout, restart or shutdown during a meeting", "real lock, sleep or user switch during a meeting",
@@ -778,5 +808,5 @@ func nativeChecks(to output: URL) throws {
             "a logout canceled after Within finished a meeting", "a second quit from the Dock or another app while Finish and Quit saves",
             "the Quit items while Finish and Quit saves", "the unlock announcement after a lock during a rollover"]]
     try writeReport(report, to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }
