@@ -125,6 +125,8 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var revision = 0
     private var dirty = false
+    /// Checkpoints written but not yet answered.
+    private var saving = 0
     private var deadline: Task<Void, Never>?
     private var editSave: Task<Void, Never>?
     private var previewNeedsAcknowledgment = false
@@ -152,6 +154,9 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     var needsAcknowledgment: Bool { preview ? previewNeedsAcknowledgment : lifecycle.needsAcknowledgment(at: Date()) }
     var lastEnd: MeetingStretchEnd? { lifecycle.lastEnd }
     var startFailure: MeetingStretchEnd? { lifecycle.startFailure }
+    /// What a quit must still write or delete, even with the meeting finished: an edit, a save under way or
+    /// failed, a deletion, or an effect not yet performed.
+    var hasUnsavedWork: Bool { dirty || saving > 0 || notSaved || deletionPending || performing || !pending.isEmpty }
 
     // MARK: Requests
 
@@ -205,12 +210,21 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     /// Stops capture, drains and saves. True only once the finished record is on disk (or nothing was kept).
     func finish() async -> Bool { await end(.finish) }
 
+    /// A quit's first step, before anything awaits: both sources stop now. `quit()` then drains and saves.
+    func stopForQuit() {
+        guard lifecycle.isOpen else { return }
+        notice = nil
+        send(.quit)
+    }
+
     /// Like Finish, but a drain that stalls is cut off by the watchdog, keeping the text already settled.
     func quit() async -> Bool {
         guard lifecycle.isOpen else {
+            // A finish's save, or a deletion, already under way lands first.
+            await settled()
             if deletionPending { return await deleteRecord() }
-            // A finished meeting can still hold a notes edit inside its debounce.
-            return dirty ? await checkpoint() : !notSaved
+            // A finished meeting can still hold a notes edit inside its debounce, or one still being written.
+            return dirty || saving > 0 ? await checkpoint() : !notSaved
         }
         let watchdog = Task { @MainActor [weak self] in
             try? await Task.sleep(for: Self.quitWatchdog)
@@ -371,8 +385,10 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         sourceStates = Dictionary(uniqueKeysWithValues: sources.map { ($0.source, .off) })
     }
 
-    /// Reduces the event and performs its effects. Returns false when it was refused.
+    /// Reduces the event and performs its effects. Returns false when it was refused. A preview keeps the phase
+    /// `configurePreview` gave it.
     @discardableResult private func send(_ event: MeetingLifecycle.Event) -> Bool {
+        guard !preview else { return false }
         let effects = lifecycle.handle(event, at: Date())
         phase = lifecycle.phase
         let refused = effects.contains { if case .refused = $0 { return true }; return false }
@@ -755,7 +771,9 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
         }
         guard let snapshot = meeting else { return !notSaved }
         revision += 1
+        saving += 1
         let outcome = await writer.write(snapshot, revision: revision)
+        saving -= 1
         guard meeting?.id == id else { return outcome == .saved }
         switch outcome {
         case .saved:

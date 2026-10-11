@@ -136,6 +136,7 @@ struct MainView: View {
     @State private var statusFocusRequest = 0
     private var needsSetup: Bool { !model.modelInstalled || !model.microphoneAllowed }
     private var title: String {
+        if model.activeCapture == .meeting { return model.meetings.homeStatus }
         switch model.phase {
         case .preparing: return "Getting ready to listen"
         case .recording: return model.audioFlowing ? "Listening to you" : "Starting your microphone"
@@ -152,6 +153,7 @@ struct MainView: View {
         }
     }
     private var subtitle: String {
+        if model.activeCapture == .meeting { return "Dictation is off until you finish the meeting." }
         switch model.phase {
         case .preparing: return model.isPracticeSession ? "Your words will appear in the practice area below." : "Your words will go to the text field you chose."
         case .recording: return model.mode == .hold ? "Release your shortcut to finish, or Escape to cancel." : "Press your shortcut again to finish, or Escape to cancel."
@@ -323,6 +325,24 @@ struct SessionStatusView: View {
     var focusRequest = 0
     @AccessibilityFocusState private var messageFocused: Bool
     var body: some View {
+        if model.activeCapture == .meeting {
+            // No Stop or Cancel: dictation's controls never reach a meeting. Its own screen comes with the Meetings space.
+            HStack(spacing: 10) {
+                HStack(spacing: 8) {
+                    MeetingStatusText(meetings: model.meetings)
+                    if !model.message.isEmpty {
+                        Text(model.message).font(.system(size: 12)).foregroundStyle(Palette.secondary).lineLimit(2)
+                            .accessibilityFocused($messageFocused)
+                    }
+                }.padding(.horizontal, 12).padding(.vertical, 7)
+                    .background(Palette.tint.opacity(0.5), in: Capsule())
+                Spacer(minLength: 6)
+            }.onChange(of: focusRequest) { messageFocused = true }
+        } else {
+            dictationStatus
+        }
+    }
+    private var dictationStatus: some View {
         HStack(spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: model.phase == .recording ? "mic.fill" : model.phase == .recovery ? "text.bubble" : "mic.slash")
@@ -339,6 +359,38 @@ struct SessionStatusView: View {
             else if model.isActive { Button("Stop", action: model.stop).primaryAction(); Button("Cancel", action: model.cancel).quietAction() }
             else if model.workerBusy { ProgressView().controlSize(.small).accessibilityLabel("Finishing current work") }
         }.onChange(of: focusRequest) { messageFocused = true }
+    }
+}
+
+extension MeetingController {
+    /// Home's words for an open meeting. Draining after the sources stopped never reads as listening.
+    var homeStatus: String {
+        switch phase {
+        case .pausing: return "Pausing meeting notes"
+        case .finishing: return "Finishing meeting notes"
+        case .discarding: return "Discarding meeting notes"
+        case .paused: return "Meeting notes are paused"
+        default: return "Meeting notes are on"
+        }
+    }
+    /// A stretch starting or recording; the microphone is off while one drains or the meeting is paused.
+    var listening: Bool { phase == .preparing || phase == .recording }
+}
+
+/// The Home status while meeting notes are open, read from the controller so its time keeps up on its own.
+private struct MeetingStatusText: View {
+    @ObservedObject var meetings: MeetingController
+    private var state: String { meetings.homeStatus }
+    var body: some View {
+        let seconds = max(0, Int(meetings.elapsed))
+        HStack(spacing: 8) {
+            Image(systemName: meetings.listening ? "mic.fill" : "mic.slash")
+                .font(.system(size: 11, weight: .medium)).foregroundStyle(meetings.listening ? Palette.accent : Palette.secondary)
+                .accessibilityHidden(true)
+            Text("\(state) · \(seconds >= 3600 ? String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60) : String(format: "%d:%02d", seconds / 60, seconds % 60))")
+                .font(.system(size: 12, weight: .semibold).monospacedDigit())
+                .accessibilityLabel("\(state), \(Duration.seconds(seconds).formatted(.units(allowed: [.hours, .minutes, .seconds], width: .wide)))")
+        }
     }
 }
 
@@ -528,7 +580,7 @@ struct PracticeView: View {
                     Button("Stop and transcribe", action: model.stop).primaryAction()
                     Button("Cancel", action: model.cancel).quietAction()
                 } else {
-                    Button("Start practice") { model.start(practice: true) }.primaryAction().disabled(!model.canStart)
+                    Button("Start practice") { model.start(practice: true) }.primaryAction().disabled(!model.canStartDictation)
                 }
                 Spacer()
                 Button("Clear", action: model.clearPractice).quietAction()

@@ -221,6 +221,10 @@ public struct MeetingLifecycle: Equatable, Sendable {
         case (.discarding, .drained):
             phase = .idle; resetDrain(); pausedSince = nil; callMayHaveChanged = false
             return [.deleteRecord]
+        case (.discarding, .drainTimedOut):
+            // A quit stops waiting for a discard's cleanup: the record is deleted all the same.
+            generation += 1; phase = .idle; resetDrain(); pausedSince = nil; callMayHaveChanged = false
+            return [.deleteRecord]
         default:
             return []
         }

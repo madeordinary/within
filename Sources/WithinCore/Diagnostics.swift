@@ -112,10 +112,32 @@ public struct RecordingStartupTracker {
     public mutating func finish() { started = nil }
 }
 
+/// The last meeting in this run, as closed values only: no title, words, notes, app name, counts, durations,
+/// times or device identities. `lastErrorCode` uses `meeting_start_failed`, `meeting_capture_or_inference`
+/// and `meeting_save_failed` for meetings.
+public struct MeetingDiagnostic: Encodable, Equatable {
+    public enum Sources: String, Encodable, CaseIterable { case microphone, microphoneAndApp = "microphone_and_app" }
+    public let lastStretchEnd: MeetingStretchEnd
+    public let sources: Sources
+    public let youState: MeetingSourceState
+    public let othersState: MeetingSourceState
+    public let startFailure: MeetingStretchEnd?
+    /// macOS 14.2 or later, where an app's sound can be included.
+    public let computerAudioSupported: Bool
+    public let remindersOn: Bool
+    public let lastSaveFailed: Bool
+    public init(lastStretchEnd: MeetingStretchEnd, sources: Sources, youState: MeetingSourceState, othersState: MeetingSourceState,
+                startFailure: MeetingStretchEnd? = nil, computerAudioSupported: Bool, remindersOn: Bool, lastSaveFailed: Bool) {
+        self.lastStretchEnd = lastStretchEnd; self.sources = sources; self.youState = youState; self.othersState = othersState
+        self.startFailure = startFailure; self.computerAudioSupported = computerAudioSupported
+        self.remindersOn = remindersOn; self.lastSaveFailed = lastSaveFailed
+    }
+}
+
 /// Closed schema: callers supply categories, never exception descriptions,
 /// device names, paths, destination identities, audio, or transcript text.
 public struct DiagnosticsReport: Encodable {
-    public let schema = 4
+    public let schema = 5
     public let appVersion: String
     public let appBuild: String
     public let macOSVersion: String
@@ -131,6 +153,7 @@ public struct DiagnosticsReport: Encodable {
     public let lastErrorCode: String
     public let lastRecordingStop: RecordingStopDiagnostic?
     public let lastRecordingStartup: RecordingStartupDiagnostic?
+    public let lastMeeting: MeetingDiagnostic?
     public let automaticUpdateChecks = false
     public let telemetry = false
 
@@ -138,7 +161,8 @@ public struct DiagnosticsReport: Encodable {
                 accessibilityPermission: Bool, shortcutRegistered: Bool, microphoneSelection: String,
                 modelInstalled: Bool, modelRevision: String, lastModelCheck: String, lastErrorCode: String,
                 lastRecordingStop: RecordingStopDiagnostic? = nil,
-                appBuild: String = "development", lastRecordingStartup: RecordingStartupDiagnostic? = nil) {
+                appBuild: String = "development", lastRecordingStartup: RecordingStartupDiagnostic? = nil,
+                lastMeeting: MeetingDiagnostic? = nil) {
         self.appVersion = appVersion; self.macOSVersion = macOSVersion; self.architecture = architecture
         self.appBuild = appBuild
         self.microphonePermission = microphonePermission; self.accessibilityPermission = accessibilityPermission
@@ -147,6 +171,7 @@ public struct DiagnosticsReport: Encodable {
         self.lastModelCheck = lastModelCheck; self.lastErrorCode = lastErrorCode
         self.lastRecordingStop = lastRecordingStop
         self.lastRecordingStartup = lastRecordingStartup
+        self.lastMeeting = lastMeeting
     }
     public func preview() -> String {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

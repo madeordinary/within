@@ -196,10 +196,14 @@ struct ModelPanel: View {
             } else if !model.modelInstalled {
                 Text("Download 632 MB from Hugging Face. The host receives your IP address. After installation, transcription runs offline.")
                     .font(.system(size: 12)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
-                Button("Download local model", action: model.downloadModel).primaryAction().disabled(model.workerBusy || model.phase != .ready)
+                Button("Download local model", action: model.downloadModel).primaryAction().disabled(model.workerBusy || model.phase != .ready || model.meetings.isOpen)
+                    .accessibilityHint(model.meetings.isOpen ? AppModel.meetingDownloadRefusal : "")
+                if model.meetings.isOpen { meetingReason(AppModel.meetingDownloadRefusal) }
             } else if allowRemoval {
                 Button("Remove model…", role: .destructive) { showingRemove = true }
-                    .disabled(model.workerBusy || model.phase != .ready)
+                    .disabled(model.workerBusy || model.phase != .ready || model.meetings.isOpen)
+                    .accessibilityHint(model.meetings.isOpen ? AppModel.meetingModelRefusal : "")
+                if model.meetings.isOpen { meetingReason(AppModel.meetingModelRefusal) }
             }
             DisclosureGroup("Model details & licenses") {
                 VStack(alignment: .leading, spacing: 8) {
@@ -213,5 +217,9 @@ struct ModelPanel: View {
             Button("Remove model", role: .destructive, action: model.removeModel)
             Button("Keep model", role: .cancel) {}
         } message: { Text("You’ll need to download it again to dictate. Your preferences stay on this Mac.") }
+    }
+    /// Why a model button is disabled during a meeting, under it, so the status line keeps describing the model.
+    private func meetingReason(_ text: String) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }

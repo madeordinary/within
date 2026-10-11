@@ -11,7 +11,7 @@ private final class RefusingPasteboard: NSPasteboard {
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary", "showMeetingsSpace", "meetingRetention"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -400,6 +400,136 @@ func nativeChecks(to output: URL) throws {
     }
     meetingPreviewPassed = meetingPreviewPassed && !previewMeetings.start(app: nil, acknowledged: true)
         && !previewMeetings.continueMeeting(app: nil, acknowledged: true) && previewMeetings.meeting == previewMeeting && previewMeetings.phase == .finished
+    // One capture at a time with a preview meeting, recording or paused: dictation, the shortcut and notes are refused
+    // with their own sentences; Stop, Cancel, Escape, lock and model removal leave the session and the meeting's phase
+    // as they were, and the model's status line alone; no pill; a quit waits for the meeting. The preview controller
+    // has no rings, so whether Stop and Cancel leave a live meeting's rings open is listed under meetingsNotTested.
+    var meetingRefusesCapturePassed = true
+    for state in ["home-meeting-recording", "home-meeting-paused"] {
+        let model = fixture(state)
+        let meetingPhase = model.meetings.phase, sessionPhase = model.phase
+        let blocked = model.activeCapture == .meeting && !model.canStartDictation && model.canStart == (state == "home-meeting-paused")
+        model.start(practice: true)
+        let dictationRefused = model.message == AppModel.meetingDictationRefusal && !model.isPracticeSession
+        let pressed = fixture(state)
+        pressed.shortcutPressed()
+        let shortcutRefused = pressed.message == AppModel.meetingDictationRefusal && pressed.phase == sessionPhase
+        model.startNoteRecording(model.newNote())
+        let noteRefused = model.notesMessage == AppModel.meetingNoteRefusal && !model.isRecordingNote
+        model.stop(); model.cancel(); model.cancel(cause: .escape)
+        let modelStatus = model.modelMessage
+        model.removeModel()
+        let modelKept = model.modelInstalled && !model.modelBusy && model.modelMessage == modelStatus
+        model.cancelForBoundary()
+        meetingRefusesCapturePassed = blocked && dictationRefused && shortcutRefused && noteRefused && modelKept && model.meetingNeedsSaveToQuit
+            && model.meetings.phase == meetingPhase && model.phase == sessionPhase && model.activeCapture == .meeting
+            && model.activeCapture != .dictation && pressed.activeCapture != .dictation && meetingRefusesCapturePassed
+    }
+    // A meeting is refused while something else holds capture, with a sentence that names it, and only then for readiness.
+    let editingShortcut = fixture("ready")
+    _ = editingShortcut.beginShortcutEditing()
+    let meetingRefusals: [(AppModel, String?)] = [
+        (fixture("note-recording"), "Stop your note recording to start meeting notes."),
+        (fixture("recording"), "Finish dictating to start meeting notes."),
+        (fixture("practice-transcribing"), "Finish dictating to start meeting notes."),
+        (fixture("recovery"), "Review your pending dictation first."),
+        (editingShortcut, "Finish practice or the shortcut change first."),
+        (fixture("setup"), "Finish setup before recording."),
+        (fixture("model-busy"), "Local speech is busy. Try again when it’s ready."),
+        (fixture("ready"), nil)]
+    let meetingStartRefusalsPassed = meetingRefusals.allSatisfy { $0.0.meetingStartRefusal() == $0.1 }
+    // Draining after the sources stopped never reads as listening, and the session is transcribing as a stretch's would be.
+    let finishing = fixture("home-meeting-finishing")
+    let recordingMeeting = fixture("home-meeting-recording")
+    let meetingWordsHonest = finishing.meetings.homeStatus == "Finishing meeting notes" && !finishing.meetings.listening && finishing.phase == .transcribing
+        && recordingMeeting.meetings.homeStatus == "Meeting notes are on" && recordingMeeting.meetings.listening && recordingMeeting.phase == .recording
+        && fixture("home-meeting-paused").meetings.homeStatus == "Meeting notes are paused" && !fixture("home-meeting-paused").meetings.listening
+    // An unload asked for between a meeting's stretches, when no session is held, waits for the next stretch to end
+    // instead of failing its start; while paused it runs at once.
+    let betweenStretches = fixture("home-meeting-between-stretches")
+    let betweenIdle = !betweenStretches.workerBusy && betweenStretches.meetings.isCapturing && betweenStretches.phase == .ready
+    betweenStretches.requestUnload()
+    let pausedMeeting = fixture("home-meeting-paused")
+    pausedMeeting.requestUnload()
+    let meetingUnloadPassed = betweenIdle && !betweenStretches.workerBusy && pausedMeeting.workerBusy
+    // With the developer default off, every existing state is unchanged: no meeting, no store, and dictation's own rules.
+    var meetingsDefaultOffPassed = true
+    for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle",
+                  "history", "history-empty", "history-off", "notes", "note-recording", "note-preparing", "notes-empty", "update-available", "recovery-dictionary",
+                  "inserted-dictionary", "practice-dictionary", "dictionary", "dictionary-empty", "dictionary-unreadable", "dictionary-recording",
+                  "dictation-dictionary-unreadable", "practice-recording", "practice-transcribing", "practice-unloading", "practice-recovery", "model-busy"] {
+        let model = fixture(state)
+        let idle = (model.phase == .ready || model.phase == .recovery) && !model.isRecordingNote
+        meetingsDefaultOffPassed = meetingsDefaultOffPassed && !model.showsMeetingsSpace && model.meetings.preview && !model.meetings.isOpen
+            && model.meetingRetention == .untilDeleted && !model.meetingsUnlistable && !model.meetingNeedsSaveToQuit
+            && model.meetings.meeting == nil && model.savedMeetingCount == 0 && model.canStartDictation == model.canStart
+            && (idle ? model.activeCapture == .none : model.activeCapture == (model.isRecordingNote ? .note : .dictation))
+    }
+    // Saved meetings in Settings → Privacy: previews count in memory only; Delete all clears that count and touches no file.
+    let savedPreview = fixture("settings-privacy-saved-meetings")
+    let savedCounted = savedPreview.savedMeetingCount == 3 && !savedPreview.meetings.isOpen
+    savedPreview.deleteAllMeetings()
+    meetingsDefaultOffPassed = meetingsDefaultOffPassed && savedCounted && savedPreview.savedMeetingCount == 0
+        && !FileManager.default.fileExists(atPath: output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Meetings.noindex").path)
+    // Meeting upkeep on temporary folders with synthetic meetings. Without a folder it creates nothing. With one: hourly
+    // pruning leaves staging files and the kept meeting alone; at launch, crash leftovers are swept, a crashed open meeting
+    // is finished where its last checkpoint or words were, an empty one is deleted, an expired one is pruned, an unreadable
+    // file is left, nothing starts capture and nothing else is created. Delete all keeps the folder.
+    let upkeepBase = FileManager.default.temporaryDirectory.appendingPathComponent("Within.MeetingUpkeepFixture.\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: upkeepBase) }
+    try FileManager.default.createDirectory(at: upkeepBase, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+    let upkeepNow = Date(timeIntervalSince1970: 1_800_000_000)
+    let startsBefore = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    let upkeepWithoutFolder = MeetingUpkeep.atLaunch(base: upkeepBase, retention: .days30, now: upkeepNow) == nil
+        && MeetingUpkeep.prune(base: upkeepBase, retention: .days30, now: upkeepNow, keeping: []) == nil && names(upkeepBase).isEmpty
+    let upkeepStore = MeetingStore(meetingsIn: upkeepBase)
+    let expiredMeeting = Meeting(title: "Synthetic expired", created: upkeepNow.addingTimeInterval(-40 * 86_400), appName: "Zoom",
+        segments: [MeetingSegment(source: .you, offset: 3, text: "synthetic older words")],
+        stretches: [MeetingStretch(start: 0, sources: [.you], end: 60, ended: .finished)], state: .finished)
+    var crashedStretch = MeetingStretch(start: 10, sources: [.you, .others])
+    crashedStretch.lastCheckpoint = 42
+    let crashedMeeting = Meeting(created: upkeepNow.addingTimeInterval(-3600), appName: "Zoom",
+        segments: [MeetingSegment(source: .others, offset: 30, text: "synthetic crashed words")], stretches: [crashedStretch])
+    let emptyMeeting = Meeting(created: upkeepNow.addingTimeInterval(-600), appName: Meeting.microphoneOnly, stretches: [MeetingStretch(start: 0, sources: [.you])])
+    let recentMeeting = Meeting(title: "Synthetic recent", created: upkeepNow.addingTimeInterval(-86_400), appName: Meeting.microphoneOnly,
+        segments: [MeetingSegment(source: .you, offset: 4, text: "synthetic recent words")],
+        stretches: [MeetingStretch(start: 0, sources: [.you], end: 30, ended: .finished)], state: .finished)
+    for meeting in [expiredMeeting, crashedMeeting, emptyMeeting, recentMeeting] { try upkeepStore.save(meeting) }
+    let unreadableMeeting = upkeepStore.directory.appendingPathComponent("\(UUID().uuidString).json")
+    try Data("{".utf8).write(to: unreadableMeeting)
+    let upkeepStaging = upkeepStore.directory.appendingPathComponent(".\(crashedMeeting.id.uuidString)-\(UUID().uuidString).tmp")
+    FileManager.default.createFile(atPath: upkeepStaging.path, contents: Data("{".utf8))
+    let hourly = MeetingUpkeep.prune(base: upkeepBase, retention: .days30, now: upkeepNow, keeping: [expiredMeeting.id])
+    let hourlyLeftAlone = hourly == MeetingUpkeep.Result(saved: 5) && FileManager.default.fileExists(atPath: upkeepStaging.path)
+    let launched = MeetingUpkeep.atLaunch(base: upkeepBase, retention: .days30, now: upkeepNow)
+    let remaining = upkeepStore.loadAll(sweepingStaging: false)
+    let recovered = remaining.documents.first { $0.id == crashedMeeting.id }
+    let crashFinished = recovered?.state == .finished && recovered?.stretches.last?.end == 42 && recovered?.stretches.last?.ended == .unexpectedExit
+        && recovered?.segments == crashedMeeting.segments
+    let upkeepFiles = [crashedMeeting.id, recentMeeting.id].map { "\($0.uuidString).json" } + [unreadableMeeting.lastPathComponent]
+    let upkeepLaunchPassed = launched == MeetingUpkeep.Result(saved: 3, recovered: 1, deleted: 1, pruned: 1) && crashFinished
+        && Set(remaining.documents.map(\.id)) == [crashedMeeting.id, recentMeeting.id] && remaining.unreadable == 1
+        && names(upkeepStore.directory) == upkeepFiles.sorted() && names(upkeepBase) == ["Meetings.noindex"]
+        && mode(upkeepStore.directory.appendingPathComponent("\(crashedMeeting.id.uuidString).json")) == 0o600
+    try upkeepStore.removeAll()
+    let deleteAllKeepsFolder = names(upkeepStore.directory).isEmpty && upkeepStore.exists && names(upkeepBase) == ["Meetings.noindex"]
+        && upkeepStore.fileCount == 0
+    // A file that can't be removed (user-immutable here) doesn't stop the rest, and is the only one left.
+    for meeting in [expiredMeeting, recentMeeting, crashedMeeting] { try upkeepStore.save(meeting) }
+    let lockedMeeting = upkeepStore.directory.appendingPathComponent("\(recentMeeting.id.uuidString).json")
+    try FileManager.default.setAttributes([.immutable: true], ofItemAtPath: lockedMeeting.path)
+    let deleteAllThrew = (try? upkeepStore.removeAll()) == nil
+    let deleteAllWentPast = deleteAllThrew && names(upkeepStore.directory) == [lockedMeeting.lastPathComponent] && upkeepStore.fileCount == 1
+    try FileManager.default.setAttributes([.immutable: false], ofItemAtPath: lockedMeeting.path)
+    try upkeepStore.removeAll()
+    // A folder that exists but can't be listed is reported as such, never as no meetings.
+    try FileManager.default.setAttributes([.posixPermissions: 0o300], ofItemAtPath: upkeepStore.directory.path)
+    let upkeepUnlistable = MeetingUpkeep.prune(base: upkeepBase, retention: .days30, now: upkeepNow, keeping: [])
+    let upkeepUnlistableReported = upkeepUnlistable?.unlistable == true && upkeepUnlistable?.saved == 0 && upkeepStore.fileCount == nil
+    try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: upkeepStore.directory.path)
+    let meetingUpkeepPassed = upkeepWithoutFolder && hourlyLeftAlone && upkeepLaunchPassed && deleteAllKeepsFolder && deleteAllWentPast && upkeepUnlistableReported
+        && MeetingStore(meetingsIn: upkeepBase.appendingPathComponent("absent")).fileCount == 0
+        && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == startsBefore
     // Previews change the dictionary in memory only: no store, no file under the unused base, no preference written.
     let dictionaryPreview = fixture("ready")
     let unusedDictionary = output.deletingLastPathComponent().appendingPathComponent("unused").appendingPathComponent("Dictionary.noindex")
@@ -622,6 +752,12 @@ func nativeChecks(to output: URL) throws {
         "notesOneCaptureAtATimePassed": notesGuardsPassed,
         "meetingsStoreOwnerOnlyAtomicPassed": meetingsStorePassed,
         "meetingPreviewControllerPassed": meetingPreviewPassed,
+        "meetingRefusesCaptureAndKeepsItsSessionPassed": meetingRefusesCapturePassed,
+        "meetingDrainingNeverReadsAsListeningPassed": meetingWordsHonest,
+        "meetingUnloadWaitsBetweenStretchesPassed": meetingUnloadPassed,
+        "meetingStartRefusalNamesBlockerPassed": meetingStartRefusalsPassed,
+        "meetingsDefaultOffLeavesStatesUnchangedPassed": meetingsDefaultOffPassed,
+        "meetingUpkeepExistingFolderOnlyPassed": meetingUpkeepPassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -631,8 +767,16 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
-        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"]]
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"],
+        "meetingsNotTested": ["a meeting started in the app (this build has no path that starts one)", "Finish and Quit with terminateLater and the 10-second watchdog",
+            "the save-failure quit alert", "logout, restart or shutdown during a meeting", "real lock, sleep or user switch during a meeting",
+            "the pause announcement after unlock, wake or a user switch", "microphone change routing during a meeting", "the status menu during a meeting",
+            "the meeting phase observer, its message reset and the meeting error codes in a running app", "upkeep and hourly pruning on the real folder at launch",
+            "Show in Finder and Delete all in the running app", "System Audio Recording prompt and its System Settings pane",
+            "Stop and Cancel leaving a live meeting's rings open", "the quit reason of a real logout, restart or shutdown",
+            "a logout canceled after Within finished a meeting", "a second quit from the Dock or another app while Finish and Quit saves",
+            "the Quit items while Finish and Quit saves", "the unlock announcement after a lock during a rollover"]]
     try writeReport(report, to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }

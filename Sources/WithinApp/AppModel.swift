@@ -81,6 +81,20 @@ final class AppModel: ObservableObject {
     @Published var lastChangeFocusRequested = false
     var lastChangeRowHasFocus = false
     private var lastChangeExpiry: Task<Void, Never>?
+    /// Meetings, behind the hidden developer default `showMeetingsSpace`, read once at launch. Off: an inert
+    /// controller and no store. This build has no path that starts a meeting either way.
+    @Published private(set) var showsMeetingsSpace: Bool
+    /// Views observe it directly; a nested object doesn't republish through this one.
+    private(set) var meetings = MeetingController(preview: true)
+    /// Meeting files in `Meetings.noindex`, kept by upkeep whatever the default says.
+    @Published private(set) var savedMeetingCount = 0
+    /// That folder exists but couldn't be listed, so the count can't be trusted.
+    @Published private(set) var meetingsUnlistable = false
+    @Published private(set) var meetingsMessage = ""
+    /// The stored `meetingRetention`; unset keeps meetings until deleted. Nothing in this build writes it.
+    private(set) var meetingRetention: DocumentRetention
+    /// A quit, logout, restart or shutdown saving the meeting; one at a time.
+    private var meetingQuit: Task<Bool, Never>?
     /// Update checks: `nil` means not chosen, which behaves as off. Nothing installs itself.
     @Published private(set) var automaticUpdateChecks: Bool?
     @Published private(set) var updateResult: UpdateCheckResult?
@@ -102,6 +116,16 @@ final class AppModel: ObservableObject {
     private var modelTask: Task<Void, Never>?
     private var pulse: Task<Void, Never>?
     private var unloadAfterSession = false
+    private var unloading = false
+    private var meetingsBase: URL?
+    private var meetingObservers: [AnyCancellable] = []
+    private var meetingWasOpen = false
+    private var meetingFailureSeen: MeetingStretchEnd?
+    private var meetingEndSeen: MeetingStretchEnd?
+    private var meetingSaveFailedSeen = false
+    /// A lock, sleep or user switch reached a capturing meeting, and whether it was still starting; announced after
+    /// unlock or wake, not while the screen locks.
+    private var boundaryPause: (reason: MeetingStretchEnd, starting: Bool)?
     private var recoveryActionEpoch = 0
     private var observers: [NSObjectProtocol] = []
     private var memoryPressure: DispatchSourceMemoryPressure?
@@ -147,6 +171,22 @@ final class AppModel: ObservableObject {
     var startsInPractice: Bool { practiceAreaIsActive?() == true }
     var effectiveRetention: HistoryRetention { historyRetention ?? .off }
     var isRecordingNote: Bool { recordingNoteID != nil }
+    /// What holds the microphone. An open meeting counts while paused too, so it blocks dictation and notes.
+    var activeCapture: CaptureActivity {
+        if meetings.isOpen { return .meeting }
+        if isRecordingNote { return .note }
+        return phase == .preparing || phase == .recording || phase == .transcribing ? .dictation : .none
+    }
+    /// `canStart` is true between a meeting's stretches; dictation-facing controls use this instead.
+    var canStartDictation: Bool { canStart && activeCapture == .none }
+    static let meetingDictationRefusal = "Finish your meeting to dictate."
+    static let meetingNoteRefusal = "Finish your meeting to record a note."
+    static let meetingModelRefusal = "Finish your meeting before removing the model."
+    static let meetingDownloadRefusal = "Finish your meeting before downloading the model."
+    /// A quit must wait for the meeting: it is open, a finished one still has something to write, or a quit is
+    /// already saving it.
+    var meetingNeedsSaveToQuit: Bool { activeCapture == .meeting || meetings.hasUnsavedWork || meetingQuit != nil }
+    var quittingMeeting: Bool { meetingQuit != nil }
     var currentBuild: Int { Int(Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "") ?? 0 }
     var availableUpdate: ReleaseInfo? { if case .available(let release) = updateResult { return release }; return nil }
     var selectedNote: Note? { notes.first { $0.id == selectedNoteID } }
@@ -177,8 +217,24 @@ final class AppModel: ObservableObject {
         historyRetention = .restored(from: UserDefaults.standard.string(forKey: "historyRetention"))
         automaticUpdateChecks = UserDefaults.standard.object(forKey: "automaticUpdateChecks") as? Bool
         showsPersonalDictionary = dictionaryFixture || UserDefaults.standard.bool(forKey: "showPersonalDictionary")
+        showsMeetingsSpace = !dictionaryFixture && UserDefaults.standard.bool(forKey: "showMeetingsSpace")
+        meetingRetention = .restored(from: UserDefaults.standard.string(forKey: "meetingRetention"))
+        observeMeetings()
         if preview { return }
         if dictionaryFixture { openDictionary(base); return }
+        // Upkeep runs whatever the default says; only use of meetings waits for it.
+        meetingsBase = base
+        let upkeep = MeetingUpkeep.atLaunch(base: base, retention: meetingRetention, now: Date())
+        savedMeetingCount = upkeep?.saved ?? 0; meetingsUnlistable = upkeep?.unlistable ?? false
+        if showsMeetingsSpace {
+            meetings = MeetingController(speech: speech, host: self, store: MeetingStore(meetingsIn: base)) { [weak self] app in
+                guard let self else { return [] }
+                var sources: [MeetingAudioSource] = [MicrophoneSource(capture: capture) { [weak self] in self?.microphoneUID ?? "" }]
+                if let app, #available(macOS 14.2, *) { sources.append(AppAudioSource(app: app)) }
+                return sources
+            }
+            observeMeetings()
+        }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.runAutomaticUpdateCheckIfDue() }
         }
@@ -193,20 +249,10 @@ final class AppModel: ObservableObject {
         loadNotes()
         if showsPersonalDictionary { openDictionary(base) }
         historyTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.pruneHistory() }
+            Task { @MainActor in self?.pruneHistory(); self?.pruneMeetings() }
         }
         shortcut.activationMode = { [weak self] in self?.mode ?? .hold }
-        shortcut.onDown = { [weak self] in
-            guard let self, !editingShortcut else { return }
-            guard !isRecordingNote else { refuseDictationDuringNote(); return }
-            switch gesture.down(mode: mode, isActive: isActive) {
-            case .start:
-                startFromCurrentWindow(fromShortcut: true)
-                shortcutActivationID = isActive ? session.id : nil
-            case .stop: shortcutActivationID = nil; stop(cause: .togglePress)
-            case nil: break
-            }
-        }
+        shortcut.onDown = { [weak self] in self?.shortcutPressed() }
         shortcut.onUp = { [weak self] in
             guard let self else { return }
             if gesture.up() == .stop { stop(cause: .hotKeyRelease) }
@@ -225,7 +271,10 @@ final class AppModel: ObservableObject {
             _ = gesture.up(); shortcutActivationID = nil
         }
         capture.onConfigurationChanged = { [weak self] in
-            guard let self, phase == .recording else { return }
+            guard let self else { return }
+            // A meeting holds the session too: its microphone change pauses it, never a dictation stop.
+            if meetings.isOpen { meetings.microphoneChanged(); return }
+            guard phase == .recording else { return }
             lastErrorCode = "audio_input_interrupted"
             forcedRecovery = "Audio input was interrupted. Review the words captured before it stopped."; stop(cause: .inputChanged)
         }
@@ -317,6 +366,7 @@ final class AppModel: ObservableObject {
     }
 
     func downloadModel() {
+        guard !meetings.isOpen else { announce(Self.meetingDownloadRefusal); return }
         guard !modelBusy, !workerBusy, phase == .ready, !modelInstalled else { return }
         modelBusy = true; modelDownloading = true; modelMessage = "Downloading model files…"; downloadProgress = 0
         modelTask = Task { [weak self] in
@@ -349,6 +399,8 @@ final class AppModel: ObservableObject {
         notify()
     }
     func removeModel() {
+        // The button is disabled with this reason shown; the model's status line keeps describing the model.
+        guard !meetings.isOpen else { announce(Self.meetingModelRefusal); return }
         guard !modelBusy, !workerBusy, phase == .ready else { return }
         capture.preventReuse()
         modelBusy = true
@@ -361,12 +413,26 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// The dictation shortcut went down. Another capture refuses it with its own reason.
+    func shortcutPressed() {
+        guard !editingShortcut else { return }
+        guard !isRecordingNote else { refuseDictationDuringNote(); return }
+        guard !meetings.isOpen else { refuseDictationDuringMeeting(); return }
+        switch gesture.down(mode: mode, isActive: isActive) {
+        case .start:
+            startFromCurrentWindow(fromShortcut: true)
+            shortcutActivationID = isActive ? session.id : nil
+        case .stop: shortcutActivationID = nil; stop(cause: .togglePress)
+        case nil: break
+        }
+    }
     func startFromCurrentWindow(fromShortcut: Bool = false) {
         start(practice: startsInPractice, fromShortcut: fromShortcut)
     }
     func start(practice: Bool, fromShortcut: Bool = false) {
         guard !editingShortcut else { return }
         guard !isRecordingNote else { refuseDictationDuringNote(); return }
+        guard !meetings.isOpen else { refuseDictationDuringMeeting(); return }
         let requestedAt = ContinuousClock.now
         refreshPermissions(mayRegisterShortcut: !fromShortcut)
         guard canStart else {
@@ -477,8 +543,8 @@ final class AppModel: ObservableObject {
 
     func suspendEscapeShortcut() { if !previewMode { shortcut.stopEscapeMonitor() } }
     func resumeEscapeShortcut() {
-        // A long note recording is never canceled by a global Escape.
-        guard !previewMode, !isRecordingNote, isActive || phase == .transcribing else { return }
+        // A long note recording or a meeting is never canceled by a global Escape.
+        guard !previewMode, activeCapture == .dictation else { return }
         shortcut.monitorEscape { [weak self] in self?.cancel(cause: .escape) }
     }
 
@@ -520,7 +586,8 @@ final class AppModel: ObservableObject {
     }
     func stop() { stop(cause: .stopButton) }
     private func stop(cause: RecordingStopCause, hardwareChord: ShortcutChordState? = nil) {
-        guard let id = session.id else { return }
+        // A meeting holds the session as well; only its own controls end it.
+        guard activeCapture != .meeting, let id = session.id else { return }
         if phase == .preparing {
             // Nothing has been heard yet; call the private path directly so a note's cancel→stop routing cannot loop.
             cancel(reason: isRecordingNote ? "Note recording canceled before it started." : "Canceled. Microphone off.", cause: cause); return
@@ -533,6 +600,7 @@ final class AppModel: ObservableObject {
     }
     func cancel() { cancel(cause: .cancelButton) }
     func cancel(cause: RecordingStopCause) {
+        guard activeCapture != .meeting || cause == .shutdown else { return }
         // Canceling a note recording keeps what was heard: it stops and saves instead.
         if isRecordingNote, cause != .shutdown { stop(cause: cause); return }
         cancel(reason: "Canceled. Microphone off.", cause: cause)
@@ -873,6 +941,86 @@ final class AppModel: ObservableObject {
         outputMuteRecord = nil
     }
 
+    // MARK: Meetings
+
+    /// Views that read `activeCapture` redraw as the meeting's phase changes. After each change lands, the
+    /// status menu follows, the Dictation message is reset when a meeting closes, and errors are recorded.
+    private func observeMeetings() {
+        meetingObservers = [meetings.$phase.sink { [weak self] _ in self?.objectWillChange.send() }]
+        guard !previewMode else { return }
+        meetingObservers.append(meetings.$phase.map { _ in () }.merge(with: meetings.$notSaved.map { _ in () })
+            .receive(on: DispatchQueue.main).sink { [weak self] in MainActor.assumeIsolated { self?.meetingStateChanged() } })
+    }
+    private static let meetingCaptureErrors: Set<MeetingStretchEnd> = [.speechError, .processingFellBehind, .microphoneStalled, .computerAudioStalled]
+    private func meetingStateChanged() {
+        let open = meetings.isOpen
+        if open != meetingWasOpen {
+            meetingWasOpen = open
+            // Dictation's last message, such as "Microphone off.", doesn't describe a meeting; a refusal is no longer true after one.
+            if open { message = "" }
+            else {
+                if message.isEmpty || message == Self.meetingDictationRefusal { message = canStartDictation ? "Ready when you are. Microphone off." : readinessWaitMessage }
+                if notesMessage == Self.meetingNoteRefusal { notesMessage = "" }
+            }
+        }
+        // An unload asked for while a stretch was starting, which then never claimed the session, runs now.
+        if unloadAfterSession, !meetings.isCapturing, !workerBusy { requestUnload() }
+        if let failure = meetings.startFailure, failure != meetingFailureSeen { lastErrorCode = "meeting_start_failed" }
+        if let end = meetings.lastEnd, end != meetingEndSeen, Self.meetingCaptureErrors.contains(end) { lastErrorCode = "meeting_capture_or_inference" }
+        if meetings.notSaved, !meetingSaveFailedSeen { lastErrorCode = "meeting_save_failed" }
+        meetingFailureSeen = meetings.startFailure; meetingEndSeen = meetings.lastEnd; meetingSaveFailedSeen = meetings.notSaved
+        notify()
+    }
+    /// Hourly, on an existing folder only. Open meetings are never expired, and the one shown, which may still be
+    /// saving, is left alone.
+    func pruneMeetings() {
+        guard let meetingsBase else { return }
+        let upkeep = MeetingUpkeep.prune(base: meetingsBase, retention: meetingRetention, now: Date(), keeping: Set([meetings.meeting?.id].compactMap { $0 }))
+        savedMeetingCount = upkeep?.saved ?? 0; meetingsUnlistable = upkeep?.unlistable ?? false
+    }
+    /// Counts the meeting files without reading them, as Settings → Privacy appears and after Show in Finder.
+    func refreshSavedMeetings() {
+        guard !previewMode, let meetingsBase else { return }
+        let count = MeetingStore(meetingsIn: meetingsBase).fileCount
+        savedMeetingCount = count ?? 0; meetingsUnlistable = count == nil
+    }
+    /// Selects the meetings folder in Finder; nothing is opened or read. A folder removed meanwhile is recounted instead.
+    func showMeetingsInFinder() {
+        guard !previewMode, let meetingsBase else { return }
+        let store = MeetingStore(meetingsIn: meetingsBase)
+        guard store.exists else { refreshSavedMeetings(); return }
+        NSWorkspace.shared.activateFileViewerSelecting([store.directory])
+    }
+    /// Every meeting file it can remove, after confirmation; only while the space is hidden, where no meeting is shown or saving.
+    func deleteAllMeetings() {
+        guard !showsMeetingsSpace, !meetings.isOpen else { return }
+        guard !previewMode, let meetingsBase else { savedMeetingCount = 0; return }
+        let store = MeetingStore(meetingsIn: meetingsBase)
+        do {
+            if store.exists { try store.removeAll() }
+            savedMeetingCount = 0; meetingsUnlistable = false; meetingsMessage = ""
+            announce("Saved meetings deleted")
+        } catch {
+            refreshSavedMeetings()
+            meetingsMessage = "Some meetings couldn’t be deleted from this Mac. Try again."
+            announce(meetingsMessage)
+        }
+    }
+    /// Quit, logout, restart or shutdown: capture stops now, before anything awaits. The task ends once the meeting
+    /// is saved (true) or its save failed (false); a second request gets the same task.
+    func finishMeetingForQuit() -> Task<Bool, Never> {
+        if let meetingQuit { return meetingQuit }
+        meetings.stopForQuit()
+        let quitting = Task { @MainActor [weak self] () -> Bool in
+            guard let self else { return false }
+            let saved = await meetings.quit()
+            meetingQuit = nil
+            return saved
+        }
+        meetingQuit = quitting
+        return quitting
+    }
+
     // MARK: Updates
 
     func setAutomaticUpdateChecks(_ enabled: Bool) {
@@ -957,6 +1105,9 @@ final class AppModel: ObservableObject {
     private func refuseDictationDuringNote() {
         message = "Stop your note recording to dictate."; notify(); announce(message)
     }
+    private func refuseDictationDuringMeeting() {
+        message = Self.meetingDictationRefusal; notify(); announce(message)
+    }
     private func loadNotes() {
         guard let notesStore else { return }
         let loaded = notesStore.loadAll()
@@ -973,6 +1124,7 @@ final class AppModel: ObservableObject {
     /// and a disk checkpoint including confirmed live text is written every ten seconds.
     func startNoteRecording(_ noteID: UUID) {
         guard !editingShortcut, !isRecordingNote, notes.contains(where: { $0.id == noteID }) else { return }
+        guard !meetings.isOpen else { notesMessage = Self.meetingNoteRefusal; announce(notesMessage); return }
         refreshPermissions(mayRegisterShortcut: true)
         guard canStart else {
             notesMessage = phase == .recovery ? "Review your pending dictation first." : modelBusy || workerBusy ? readinessWaitMessage
@@ -1123,8 +1275,9 @@ final class AppModel: ObservableObject {
         persistHistory()
     }
     private func notify() {
-        if phase == .ready, !workerBusy, !modelBusy, message == readinessWaitMessage {
-            message = canStart ? "Ready when you are. Microphone off." : !modelVerified ? modelMessage : "Check your microphone and permissions in Settings."
+        // While a meeting is open, even paused, dictation isn't ready, so nothing says it is.
+        if phase == .ready, !workerBusy, !modelBusy, message == readinessWaitMessage, !meetings.isOpen {
+            message = canStartDictation ? "Ready when you are. Microphone off." : !modelVerified ? modelMessage : "Check your microphone and permissions in Settings."
             announce(message)
         }
         stateChanged?()
@@ -1134,9 +1287,24 @@ final class AppModel: ObservableObject {
     }
     private func installLifecycleObservers() {
         let workspace = NSWorkspace.shared.notificationCenter
-        for name in [NSWorkspace.willSleepNotification, NSWorkspace.sessionDidResignActiveNotification] {
-            observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.cancelForBoundary() } })
+        observers.append(workspace.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.cancelForBoundary() } })
+        // Its own handler, so a meeting's gap says the user switched rather than the Mac slept.
+        observers.append(workspace.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.cancelForBoundary(.userSwitched) }
+        })
+        for name in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.didWakeNotification] {
+            observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.announceBoundaryPause() } })
         }
+        // Logout, restart or shutdown: an alert would wait while capture runs, so capture stops now and the meeting is
+        // finished and saved. If the logout is canceled, Within stays open with the meeting finished.
+        observers.append(workspace.addObserver(forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.meetingNeedsSaveToQuit else { return }
+                _ = self.finishMeetingForQuit()
+            }
+        })
+        // The name of the unlock notification is UNVERIFIED; wake and becoming active again also announce.
+        DistributedNotificationCenter.default().addObserver(self, selector: #selector(screenUnlocked), name: NSNotification.Name("com.apple.screenIsUnlocked"), object: nil)
         observers.append(workspace.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
             MainActor.assumeIsolated {
                 guard let self else { return }
@@ -1156,8 +1324,15 @@ final class AppModel: ObservableObject {
         memoryPressure?.resume()
     }
     @objc private func screenLocked() { cancelForBoundary() }
-    func cancelForBoundary() {
+    @objc private func screenUnlocked() { announceBoundaryPause() }
+    func cancelForBoundary(_ reason: MeetingStretchEnd = .lockOrSleep) {
         clearLastDictationChange()
+        if meetings.isOpen {
+            // Pause and keep: a gap marks it, nothing resumes on its own, and the models unload once the rings drain.
+            if meetings.isCapturing { boundaryPause = (reason, meetings.phase == .preparing) }
+            meetings.boundary(reason)
+            requestUnload(); return
+        }
         if isRecordingNote {
             // Pause and keep: the note keeps its words and a visible gap; Record resumes explicitly.
             pendingNoteGap = "Paused when the Mac locked or went to sleep"
@@ -1174,13 +1349,26 @@ final class AppModel: ObservableObject {
         }
         requestUnload()
     }
-    private func requestUnload() {
+    /// After unlock or wake: a meeting a boundary paused says so now, once, rather than while the screen locked.
+    private func announceBoundaryPause() {
+        guard let pending = boundaryPause else { return }
+        boundaryPause = nil
+        // The stretch the boundary ended, including a rollover's; a pause or finish already under way said so itself.
+        // A start the boundary stopped closed no stretch, so its own reason is used.
+        let ended = meetings.lastEnd.flatMap { $0 == .lockOrSleep || $0 == .userSwitched ? $0 : nil }
+        guard meetings.isOpen, let reason = ended ?? (pending.starting ? pending.reason : nil),
+              let detail = MeetingGap(start: 0, end: 0, reason: reason).detail(appName: "") else { return }
+        announce("Meeting notes paused: \(detail). Microphone off.")
+    }
+    func requestUnload() {
         capture.preventReuse()
-        if workerBusy { unloadAfterSession = true; return }
-        workerBusy = true
+        // An unload already running covers a second request, such as a meeting's own after a lock. A meeting between
+        // stretches, such as a rollover saving before its next one, holds no session but would fail without the models.
+        if workerBusy || meetings.isCapturing { if !unloading { unloadAfterSession = true }; return }
+        workerBusy = true; unloading = true; unloadAfterSession = false
         worker = Task {
             await speech.unload()
-            workerBusy = false; worker = nil; notify()
+            unloading = false; workerBusy = false; worker = nil; notify()
         }
     }
     func setLaunchAtLogin(_ enabled: Bool) {
@@ -1194,7 +1382,7 @@ final class AppModel: ObservableObject {
             } catch { loginMessage = "macOS couldn’t change this preference. Try from the installed app in Applications." }
         }
     }
-    private func playCue(start: Bool) {
+    func playCue(start: Bool) {
         if soundsEnabled { NSSound(named: start ? "Pop" : "Tink")?.play() }
     }
     func diagnostics() -> String {
@@ -1219,7 +1407,16 @@ final class AppModel: ObservableObject {
             modelInstalled: modelInstalled, modelRevision: manifest.revision, lastModelCheck: lastModelCheck,
             lastErrorCode: lastErrorCode, lastRecordingStop: stopDiagnostics.lastStop,
             appBuild: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development",
-            lastRecordingStartup: startupDiagnostics.latest).preview()
+            lastRecordingStartup: startupDiagnostics.latest, lastMeeting: meetingDiagnostic()).preview()
+    }
+    /// Closed values only, and nil until a meeting in this run ended a stretch or failed to start.
+    private func meetingDiagnostic() -> MeetingDiagnostic? {
+        guard let end = meetings.lastEnd ?? meetings.startFailure else { return nil }
+        let supported: Bool
+        if #available(macOS 14.2, *) { supported = true } else { supported = false }
+        return MeetingDiagnostic(lastStretchEnd: end, sources: meetings.sourceStates[.others] == nil ? .microphone : .microphoneAndApp,
+            youState: meetings.sourceStates[.you] ?? .off, othersState: meetings.sourceStates[.others] ?? .off,
+            startFailure: meetings.startFailure, computerAudioSupported: supported, remindersOn: false, lastSaveFailed: meetings.notSaved)
     }
     /// Synthetic entries for previews and native checks only.
     static let previewWords = PersonalDictionary(entries: [
@@ -1240,6 +1437,24 @@ final class AppModel: ObservableObject {
         automaticUpdateChecks = nil; updateResult = nil
         showsPersonalDictionary = false; dictionaryHasSetAside = false; dictionaryMessage = ""; replaceDictionary(with: .missing)
         lastChangeExpiry?.cancel(); lastDictationChange = nil; lastChangeCopyFailed = false; lastChangeExpiredWhileFocused = false; practiceChange = nil
+        // Meeting visibility and retention are forced in memory only; the defaults are never written or read here.
+        showsMeetingsSpace = false; savedMeetingCount = 0; meetingsUnlistable = false; meetingsMessage = ""; meetingRetention = .untilDeleted
+        meetings.configurePreview(nil, phase: .idle)
+        if state.hasPrefix("home-meeting") || state == "notes-meeting" {
+            showsMeetingsSpace = true
+            let phase: MeetingLifecycle.Phase = switch state {
+            case "home-meeting-paused", "notes-meeting": .paused
+            case "home-meeting-finishing": .finishing
+            // Native checks only: a stretch starting or rolling over, before it claims the session.
+            case "home-meeting-between-stretches": .preparing
+            default: .recording
+            }
+            meetings.configurePreview(Self.previewMeeting, phase: phase, sourceStates: phase == .recording ? [.you: .live, .others: .live] : [.you: .off, .others: .off],
+                                      elapsed: 754, needsAcknowledgment: phase == .paused)
+        }
+        if state.hasPrefix("settings-privacy-saved-meetings") { savedMeetingCount = 3 }
+        if state == "settings-privacy-saved-meetings-days30" { meetingRetention = .days30 }
+        if state == "settings-privacy-meetings-unlistable" { meetingsUnlistable = true }
         if state.hasSuffix("-dictionary") { previewDictionary(.loaded(Self.previewWords)) }
         if state == "dictionary" || state == "dictionary-recording" { previewDictionary(.loaded(Self.previewPageWords)) }
         if state == "dictionary-empty" { previewDictionary(.missing) }
@@ -1252,9 +1467,9 @@ final class AppModel: ObservableObject {
                 build: 12, prerelease: true))
         }
         notes = []; selectedNoteID = nil; recordingNoteID = nil; liveConfirmed = ""; liveVolatile = ""
-        if state == "notes" || state == "note-recording" || state == "note-preparing" {
+        if state == "notes" || state == "note-recording" || state == "note-preparing" || state == "notes-meeting" {
             // Synthetic sample notes only; previews never read or write the Notes folder.
-            let now = Date()
+            let now = state == "notes-meeting" ? Date(timeIntervalSince1970: 1_800_000_000) : Date()
             var plan = Note(title: "Weekend planning", created: now.addingTimeInterval(-3 * 3600), body: "Pick up the bike from the shop on Saturday morning.\n\nAsk whether the Sunday hike still works if it rains. Maybe move it to the afternoon.")
             plan.modified = now.addingTimeInterval(-20 * 60)
             var ideas = Note(created: now.addingTimeInterval(-2 * 86_400), body: "Ideas for the onboarding flow: fewer words, show the shortcut as real keys, and let people try it before choosing settings.")
@@ -1316,11 +1531,73 @@ final class AppModel: ObservableObject {
         } else if state == "recording" || state == "dictionary-recording" {
             let id = session.begin()!; _ = session.recording(id); elapsed = 12; level = 0.45; audioFlowing = true
         }
+        if meetings.isOpen {
+            // A capturing meeting holds the session as each of its stretches does, transcribing while it drains.
+            if meetings.isCapturing, state != "home-meeting-between-stretches" {
+                let id = session.begin()!; _ = session.recording(id); workerBusy = true
+                if meetings.phase != .recording { _ = session.stopped(id) }
+            }
+            message = state == "home-meeting-refused" ? Self.meetingDictationRefusal : ""
+        }
         notify()
     }
+    /// A synthetic meeting for previews and native checks only.
+    static let previewMeeting = Meeting(id: UUID(uuidString: "6F1D2C3B-4A59-4E68-9F70-8192A3B4C5D6")!, title: "Weekly planning",
+        created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
+        segments: [MeetingSegment(source: .others, offset: 12, text: "Thanks for joining, everyone."),
+                   MeetingSegment(source: .you, offset: 20, text: "Happy to be here.")],
+        stretches: [MeetingStretch(start: 0, sources: [.you, .others])])
     func shutdown() {
+        // Before anything else, so quitting never leaves a meeting source running.
+        meetings.emergencyStop()
         flushNoteEdits(); cancel(cause: .shutdown); clearLastDictationChange(); practiceChange = nil
         restoreOutputIfNeeded(); modelTask?.cancel(); shortcut.shutdown()
+    }
+}
+
+enum CaptureActivity { case none, dictation, note, meeting }
+
+/// A meeting's stretches hold the one session the way a note recording does, so every guard on `phase` and
+/// `workerBusy` applies while it captures.
+extension AppModel: MeetingHost {
+    var microphoneAuthorized: Bool { AVCaptureDevice.authorizationStatus(for: .audio) == .authorized }
+    var modelManifest: ModelManifest { manifest }
+    func modelDirectory() async -> URL { await store.directory }
+
+    /// What holds capture, in order, before whether Within is ready.
+    func meetingStartRefusal() -> String? {
+        if isRecordingNote { return "Stop your note recording to start meeting notes." }
+        if phase == .preparing || phase == .recording || phase == .transcribing { return "Finish dictating to start meeting notes." }
+        if phase == .recovery { return "Review your pending dictation first." }
+        if hasActivePracticeSession || editingShortcut { return "Finish practice or the shortcut change first." }
+        refreshPermissions(mayRegisterShortcut: true)
+        guard !canStart else { return nil }
+        return modelBusy || workerBusy ? readinessWaitMessage : !modelInstalled || !microphoneAllowed ? "Finish setup before recording."
+            : !selectedInputAvailable ? "Your selected microphone is unavailable." : "Check the local speech model in Settings."
+    }
+
+    func claimCapture() -> UUID? {
+        guard !workerBusy, !modelBusy, let id = session.begin() else { return nil }
+        // As for a note: no practice session, destination or hold gesture belongs to a meeting.
+        isPracticeSession = false
+        target?.stopObserving(); target = nil; fromHoldShortcut = false; audioFlowing = false
+        workerBusy = true; elapsed = 0; level = 0
+        notify()
+        return id
+    }
+    func captureRecording(_ id: UUID) -> Bool {
+        guard session.recording(id) else { return false }
+        notify()
+        return true
+    }
+    func captureDraining(_ id: UUID) {
+        _ = session.stopped(id)
+        notify()
+    }
+    func releaseCapture(_ id: UUID) async {
+        if session.isCurrent(id) { session.finish(id) }
+        if unloadAfterSession { await speech.unload(); capture.preventReuse(); unloadAfterSession = false }
+        workerBusy = false; notify()
     }
 }
 

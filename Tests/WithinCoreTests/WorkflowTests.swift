@@ -144,8 +144,9 @@ final class WorkflowTests: XCTestCase {
             microphoneSelection: "system_default", modelInstalled: true, modelRevision: "test",
             lastModelCheck: "passed", lastErrorCode: "none", lastRecordingStop: observation)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.preview().utf8)) as? [String: Any])
-        XCTAssertEqual(json["schema"] as? Int, 4)
+        XCTAssertEqual(json["schema"] as? Int, 5)
         XCTAssertEqual(json["telemetry"] as? Bool, false)
+        XCTAssertEqual(Set(json.keys), Self.reportKeys.union(["lastRecordingStop"]))
         let stop = try XCTUnwrap(json["lastRecordingStop"] as? [String: Any])
         XCTAssertEqual(Set(stop.keys), ["cause", "phase", "hardwareChord", "sessionChord", "eventListeningAllowed", "audioConfiguration"])
         let configuration = try XCTUnwrap(stop["audioConfiguration"] as? [String: Any])
@@ -189,6 +190,7 @@ final class WorkflowTests: XCTestCase {
             microphoneSelection: "selected_device_identity_omitted", modelInstalled: true, modelRevision: "test",
             lastModelCheck: "passed", lastErrorCode: "none", appBuild: "6", lastRecordingStartup: tracker.latest)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report.preview().utf8)) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), Self.reportKeys.union(["lastRecordingStartup"]))
         XCTAssertEqual(json["appBuild"] as? String, "6")
         let startup = try XCTUnwrap(json["lastRecordingStartup"] as? [String: Any])
         XCTAssertEqual(Set(startup.keys), ["trigger", "practice", "milliseconds"])
@@ -197,6 +199,46 @@ final class WorkflowTests: XCTestCase {
         let timings = try XCTUnwrap(startup["milliseconds"] as? [String: Int])
         XCTAssertEqual(Set(timings.keys), Set(RecordingStartupStage.allCases.map(\.rawValue)))
         XCTAssertTrue(timings.values.allSatisfy { $0 >= 0 })
+    }
+    /// Every report has these; the last recording stop, startup and meeting appear only once they exist.
+    static let reportKeys: Set<String> = ["schema", "appVersion", "appBuild", "macOSVersion", "architecture", "microphonePermission",
+        "accessibilityPermission", "shortcutRegistered", "microphoneSelection", "modelInstalled", "modelRevision", "modelVerificationPolicy",
+        "lastModelCheck", "lastErrorCode", "automaticUpdateChecks", "telemetry"]
+    private func report(lastMeeting: MeetingDiagnostic?) -> DiagnosticsReport {
+        DiagnosticsReport(appVersion: "test", macOSVersion: "test", architecture: "arm64", microphonePermission: "allowed",
+            accessibilityPermission: true, shortcutRegistered: true, microphoneSelection: "system_default", modelInstalled: true,
+            modelRevision: "test", lastModelCheck: "passed", lastErrorCode: "meeting_save_failed", lastMeeting: lastMeeting)
+    }
+    func testReportWithoutAMeetingHasNoMeetingField() throws {
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report(lastMeeting: nil).preview().utf8)) as? [String: Any])
+        XCTAssertEqual(json["schema"] as? Int, 5)
+        XCTAssertEqual(Set(json.keys), Self.reportKeys)
+    }
+    func testMeetingDiagnosticExportsOnlyClosedValues() throws {
+        let meeting = MeetingDiagnostic(lastStretchEnd: .lockOrSleep, sources: .microphoneAndApp, youState: .off, othersState: .lost,
+            startFailure: .computerAudioStalled, computerAudioSupported: true, remindersOn: false, lastSaveFailed: true)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report(lastMeeting: meeting).preview().utf8)) as? [String: Any])
+        XCTAssertEqual(Set(json.keys), Self.reportKeys.union(["lastMeeting"]))
+        XCTAssertEqual(json["lastErrorCode"] as? String, "meeting_save_failed")
+        let exported = try XCTUnwrap(json["lastMeeting"] as? [String: Any])
+        XCTAssertEqual(Set(exported.keys), ["lastStretchEnd", "sources", "youState", "othersState", "startFailure", "computerAudioSupported", "remindersOn", "lastSaveFailed"])
+        let ends = Set(MeetingStretchEnd.allCases.map(\.rawValue))
+        XCTAssertEqual(exported["lastStretchEnd"] as? String, "lock_or_sleep")
+        XCTAssertEqual(exported["startFailure"] as? String, "computer_audio_stalled")
+        XCTAssertTrue(ends.isSuperset(of: [exported["lastStretchEnd"], exported["startFailure"]].compactMap { $0 as? String }))
+        XCTAssertEqual(exported["sources"] as? String, "microphone_and_app")
+        XCTAssertEqual(exported["youState"] as? String, "off")
+        XCTAssertEqual(exported["othersState"] as? String, "lost")
+        for flag in ["computerAudioSupported", "remindersOn", "lastSaveFailed"] { XCTAssertNotNil(exported[flag] as? Bool, flag) }
+    }
+    func testMeetingDiagnosticLeavesOutAStartFailureThatNeverHappened() throws {
+        let meeting = MeetingDiagnostic(lastStretchEnd: .finished, sources: .microphone, youState: .off, othersState: .off,
+            computerAudioSupported: false, remindersOn: false, lastSaveFailed: false)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(report(lastMeeting: meeting).preview().utf8)) as? [String: Any])
+        let exported = try XCTUnwrap(json["lastMeeting"] as? [String: Any])
+        XCTAssertEqual(Set(exported.keys), ["lastStretchEnd", "sources", "youState", "othersState", "computerAudioSupported", "remindersOn", "lastSaveFailed"])
+        XCTAssertEqual(exported["sources"] as? String, "microphone")
+        XCTAssertEqual(Set(MeetingDiagnostic.Sources.allCases.map(\.rawValue)), ["microphone", "microphone_and_app"])
     }
     func testUnchangedRunningInputSurvivesConfigurationNotification() {
         let unchanged = AudioConfigurationObservation(engineRunning: true, deviceUnchanged: true,

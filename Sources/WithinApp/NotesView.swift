@@ -120,12 +120,19 @@ struct NoteEditor: View {
                 }
             } else {
                 HStack(spacing: 12) {
+                    // While a meeting is open the hint and a tooltip give the reason Record is disabled; otherwise there is no tooltip.
+                    let meeting = model.activeCapture == .meeting
                     Button { model.startNoteRecording(note.id) } label: { Label("Record", systemImage: "mic.fill") }
-                        .primaryAction().disabled(!model.canStart || model.isRecordingNote)
-                        .accessibilityHint("Starts the microphone and adds your words to this note")
+                        .primaryAction().disabled(!model.canStart || model.isRecordingNote || meeting)
+                        .accessibilityHint(meeting ? AppModel.meetingNoteRefusal : "Starts the microphone and adds your words to this note")
+                        .help(meeting ? AppModel.meetingNoteRefusal : "")
                     Text(model.selectedInputName).font(.system(size: 12)).foregroundStyle(Palette.secondary).lineLimit(1)
                     Spacer()
                     Label("Saved on this Mac", systemImage: "lock.shield").font(.system(size: 11)).foregroundStyle(Palette.secondary)
+                }
+                // A disabled Record says why.
+                if model.activeCapture == .meeting && model.notesMessage != AppModel.meetingNoteRefusal {
+                    Text(AppModel.meetingNoteRefusal).font(.system(size: 11)).foregroundStyle(Palette.secondary)
                 }
             }
             if !model.notesMessage.isEmpty {

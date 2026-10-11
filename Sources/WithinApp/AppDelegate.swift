@@ -5,7 +5,7 @@ import Darwin
 import Carbon
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
     private var model: AppModel!
     private var mainWindow: NSWindow?
     private let navigation = AppNavigation()
@@ -16,8 +16,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var cancelItem: NSMenuItem?
     private var reviewItem: NSMenuItem?
     private var originalItem: NSMenuItem?
+    private var quitItem: NSMenuItem?
     private var localKeyMonitor: Any?
     private var lockDescriptor: Int32 = -1
+    private var finishingMeetingToQuit = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
@@ -50,8 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             model.stateChanged = { [weak self] in self?.refreshStatus() }
             makeMenu()
             localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                // Escape never cancels a note recording; Stop saves it instead.
-                guard event.keyCode == 53, let self, self.model.phase != .ready, !self.model.isRecordingNote else { return event }
+                // Escape never cancels a note recording or a meeting; their own controls end them.
+                guard event.keyCode == 53, let self, self.model.phase != .ready, !self.model.isRecordingNote, self.model.activeCapture != .meeting else { return event }
                 guard NSApp.modalWindow == nil, NSApp.keyWindow?.attachedSheet == nil else { return event }
                 if self.model.phase == .recovery {
                     guard self.navigation.page == .recovery,
@@ -74,6 +76,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
+        // An open meeting, or a finished one with an edit or a failed save still to write: quit once it is saved.
+        if model.meetingNeedsSaveToQuit {
+            // Logout, restart or shutdown never waits on an alert, which would sit while capture runs; neither does a
+            // quit already saving, or a discard, which deletes rather than saves.
+            if model.activeCapture == .meeting, !model.quittingMeeting, model.meetings.phase != .discarding, !Self.quitIsPowerOff {
+                let alert = NSAlert(); alert.messageText = "Finish meeting notes and quit?"
+                alert.informativeText = "Within stops listening, saves the transcript and your notes, then quits."
+                alert.addButton(withTitle: "Finish and Quit"); alert.addButton(withTitle: "Cancel")
+                guard runConfirmation(alert) == .alertFirstButtonReturn else { return .terminateCancel }
+            }
+            // Capture stops before this returns. A second terminate while AppKit waits quits at once without asking
+            // (scratch AppKit probe, not Within), so both Quit items are off until the reply.
+            let quitting = model.finishMeetingForQuit()
+            finishingMeetingToQuit = true; refreshStatus()
+            Task { @MainActor [weak self] in
+                // Quits only once the meeting is saved; a drain that stalls is cut off by the controller's watchdog.
+                let saved = await quitting.value
+                self?.finishingMeetingToQuit = false; self?.refreshStatus()
+                if saved { model.shutdown() }
+                NSApp.reply(toApplicationShouldTerminate: saved)
+                guard !saved else { return }
+                let failed = NSAlert()
+                if model.meetings.deletionPending {
+                    failed.messageText = "The discarded meeting couldn’t be deleted from this Mac, so Within didn’t quit."
+                    failed.informativeText = "Check the meetings folder in Finder and try again."
+                } else {
+                    failed.messageText = "Meeting notes couldn’t be saved, so Within didn’t quit."
+                    failed.informativeText = "Check free space and try again."
+                }
+                failed.runModal()
+            }
+            return .terminateLater
+        }
         if model.isRecordingNote {
             let alert = NSAlert(); alert.messageText = "Quit while recording a note?"
             alert.informativeText = "Your note is saved about every ten seconds. Words from the last few seconds may be lost. Choose Stop in the note first to keep everything."
@@ -86,6 +121,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if runConfirmation(alert) != .alertSecondButtonReturn { return .terminateCancel }
         }
         model.shutdown(); return .terminateNow
+    }
+    /// Logout, restart or shutdown, from the quit event's reason. UNVERIFIED on a real logout; the power-off
+    /// notification, when it comes first, has already started the meeting's quit.
+    private static var quitIsPowerOff: Bool {
+        guard let event = NSAppleEventManager.shared().currentAppleEvent, event.eventClass == AEEventClass(kCoreEventClass),
+              event.eventID == AEEventID(kAEQuitApplication) else { return false }
+        guard let reason = (event.attributeDescriptor(forKeyword: AEKeyword(kAEQuitReason)) ?? event.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason)))?.enumCodeValue
+        else { return false }
+        return [kAEShutDown, kAERestart, kAELogOut, kAEReallyLogOut, kAEShowRestartDialog, kAEShowShutdownDialog].map { OSType($0) }.contains(reason)
     }
     func applicationWillTerminate(_ notification: Notification) {
         model?.shutdown()
@@ -102,7 +146,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         reviewItem = item("Review Pending Words…", #selector(reviewWords)); menu.addItem(reviewItem!)
         originalItem = item("Show Original Transcription…", #selector(showOriginal)); menu.addItem(originalItem!)
         menu.addItem(.separator()); menu.addItem(item("Open Within…", #selector(openWithin)))
-        menu.addItem(.separator()); menu.addItem(item("Quit Within", #selector(quit)))
+        quitItem = item("Quit Within", #selector(quit))
+        menu.addItem(.separator()); menu.addItem(quitItem!)
         statusItem?.menu = menu
         menu.insertItem(item("Settings…", #selector(openSettings)), at: menu.numberOfItems - 2)
         menu.insertItem(item("Within Help", #selector(openHelp)), at: menu.numberOfItems - 2)
@@ -161,7 +206,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func openHelp() { showHelpWindow() }
     @objc private func openSetup() { showSetupWindow() }
     @objc private func openPractice() { showPracticeWindow() }
-    @objc private func quit() { NSApp.terminate(nil) }
+    /// A second terminate while Finish and Quit saves would end the app at once, so it does nothing then.
+    @objc private func quit() { if !finishingMeetingToQuit { NSApp.terminate(nil) } }
+    /// The app menu enables its items itself; its Quit says what is happening while the meeting saves.
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard menuItem.action == #selector(quit) else { return true }
+        menuItem.title = finishingMeetingToQuit ? Self.finishingTitle : "Quit Within"
+        return !finishingMeetingToQuit
+    }
+    private static let finishingTitle = "Finishing Meeting Notes…"
 
     private func makeWindow<V: View>(_ title: String, size: NSSize, minimum: NSSize, autosave: String, view: V) -> NSWindow {
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
@@ -291,12 +344,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         statusItem?.button?.image = NSImage(systemSymbolName: model.phase == .recording ? "mic.fill" : "waveform", accessibilityDescription: model.phase == .recording ? "Within. Microphone on." : "Within. Microphone off.")
         statusItem?.button?.toolTip = model.phase == .recording ? "Within · recording" : "Within · microphone off"
         actionItem?.title = model.isRecordingNote ? "Stop Note Recording" : model.isActive ? "Stop and Transcribe" : "Start Dictation"
-        actionItem?.isEnabled = model.isActive || model.canStart
+        actionItem?.isEnabled = model.isActive || model.canStartDictation
         cancelItem?.isEnabled = active
+        // Dictation's items would stop the meeting's session; a meeting has its own controls.
+        let meeting = model.activeCapture == .meeting
+        actionItem?.isHidden = meeting; cancelItem?.isHidden = meeting
         reviewItem?.isHidden = model.phase != .recovery
         originalItem?.isHidden = model.lastDictationChange == nil
-        // The pill belongs to dictation only; a note shows its recording in the Notes space and menu bar.
-        if active && !model.isRecordingNote {
+        quitItem?.title = finishingMeetingToQuit ? Self.finishingTitle : "Quit Within"
+        quitItem?.isEnabled = !finishingMeetingToQuit
+        // The pill belongs to dictation only; a note or a meeting shows its recording elsewhere.
+        if model.activeCapture == .dictation {
             if pill == nil {
                 let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: PillView.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
                 panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true

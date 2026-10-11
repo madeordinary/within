@@ -547,6 +547,20 @@ final class MeetingLifecycleTests: XCTestCase {
         XCTAssertEqual(empty.violations + titled.violations, [])
     }
 
+    func testQuitWatchdogWhileDiscardingStillDeletesTheRecord() {
+        var driver = driver(in: .discarding, titled: true)
+        let discarding = driver.lifecycle.generation
+        XCTAssertEqual(driver.send(.quit, at: now), [])
+        XCTAssertEqual(driver.send(.drainTimedOut(generation: discarding), at: now), [.deleteRecord])
+        XCTAssertEqual(driver.lifecycle.phase, .idle)
+        XCTAssertTrue(driver.deleted && !driver.record)
+        let deleted = driver.lifecycle
+        driver.send(.drained(generation: discarding), at: now)
+        XCTAssertEqual(driver.lifecycle, deleted)
+        XCTAssertFalse(driver.sourcesOn)
+        XCTAssertEqual(driver.violations, [])
+    }
+
     func testWatchdogOfAnEarlierDrainChangesNothing() {
         var driver = driver(in: .recording)
         driver.send(.quit, at: now)

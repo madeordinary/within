@@ -30,7 +30,9 @@ func renderPreviews(to directory: URL) throws {
     }
     for state in ["setup", "ready", "model-error", "missing-input", "permission", "recovery", "recording", "practice", "practice-empty", "practice-empty-toggle", "history", "history-empty", "history-off", "notes", "note-recording", "notes-empty", "update-available",
                   "recovery-dictionary", "inserted-dictionary", "practice-dictionary",
-                  "dictionary", "dictionary-empty", "dictionary-unreadable", "dictionary-recording", "dictation-dictionary-unreadable"] {
+                  "dictionary", "dictionary-empty", "dictionary-unreadable", "dictionary-recording", "dictation-dictionary-unreadable",
+                  "home-meeting-recording", "home-meeting-paused", "home-meeting-refused", "home-meeting-finishing", "notes-meeting",
+                  "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
         if state == "practice-empty" || state == "history" {
@@ -52,7 +54,11 @@ func renderPreviews(to directory: URL) throws {
                 try render(state == "dictionary" ? "within-settings-dictionary\(dark ? "-dark" : "")" : name, view: shell(model, .settings), size: dictionarySize, dark: dark)
             case "recording": try render(name, view: PillView(model: model), size: NSSize(width: PillView.width, height: PillView.height), dark: dark)
             case "practice", "practice-empty", "practice-empty-toggle", "practice-dictionary": try render(name, view: shell(model, .home, practice: true), size: NSSize(width: 900, height: 900), dark: dark)
-            case "notes", "note-recording", "notes-empty": try render(name, view: shell(model, .notes), size: shellSize, dark: dark)
+            case "notes", "note-recording", "notes-empty", "notes-meeting": try render(name, view: shell(model, .notes), size: shellSize, dark: dark)
+            case "settings-privacy-saved-meetings", "settings-privacy-saved-meetings-days30", "settings-privacy-meetings-unlistable":
+                // The developer preview's saved meetings while the space is hidden: the only meeting line in Settings.
+                model.settingsSection = "Privacy"
+                try render(name, view: shell(model, .settings), size: shellSize, dark: dark)
             default: try render(name, view: shell(model, .home), size: shellSize, dark: dark)
             }
             if state == "update-available" {

@@ -211,6 +211,10 @@ import WithinCore
             checks["quitStarted"] = controller.start(app: app, acknowledged: true)
             checks["quitLive"] = await waitUntil(60) { controller.phase == .recording }
             try? await Task.sleep(for: .seconds(2))
+            // A quit's first step stops both sources before anything awaits, as the app's quit and logout use it.
+            controller.stopForQuit()
+            checks["quitStoppedSourcesAtOnce"] = controller.phase == .finishing && session.host.draining
+                && controller.sourceStates.values.allSatisfy { $0 == .off } && controller.levels.isEmpty
             checks["quitSaved"] = await controller.quit()
             let quitID = controller.meeting?.id
             checks["quitStretchEnded"] = controller.meeting?.stretches.map(\.ended) == [.quit]
@@ -607,6 +611,8 @@ private final class FixtureCounter: @unchecked Sendable {
     var microphoneAuthorized: Bool { true }
     var dictionaryMatcher: DictionaryMatcher { .empty }
     var idle: Bool { session.phase == .ready && !unloading }
+    /// The session was told its stretch is draining.
+    var draining: Bool { session.phase == .transcribing }
     func modelDirectory() async -> URL { directory }
     func meetingStartRefusal() -> String? { idle ? nil : "Local speech is busy. Try again when it's ready." }
     func claimCapture() -> UUID? {

@@ -264,6 +264,7 @@ struct SettingsView: View {
     @State private var showingDiagnostics = false
     @State private var confirmingClear = false
     @State private var pendingRetention: HistoryRetention?
+    @State private var confirmingMeetingsDelete = false
     static let sections = [("General", "slider.horizontal.3"), ("Audio", "mic"), ("History", "clock.arrow.circlepath"), ("Privacy", "hand.raised"), ("Model", "internaldrive"), ("About", "info.circle")]
     /// Dictionary sits after Audio, and only behind the developer default.
     static func sections(showingDictionary: Bool) -> [(String, String)] {
@@ -323,6 +324,10 @@ struct SettingsView: View {
                     Text("Audio and pending words stay in memory. Copy uses your clipboard only when you choose it. Quitting clears pending text.")
                         .font(.system(size: 12)).foregroundStyle(Palette.secondary)
                 }.withinSurface()
+                    // A file removed in Finder since launch or the last hourly upkeep is reflected here.
+                    .onAppear(perform: model.refreshSavedMeetings)
+                // Meetings saved by the developer preview stay visible and removable only while the space is hidden.
+                if !model.showsMeetingsSpace && (model.savedMeetingCount > 0 || model.meetingsUnlistable) { savedMeetings }
                 VStack(alignment: .leading, spacing: 12) {
                     Toggle("Compatibility paste · experimental", isOn: Binding(get: { model.compatibilityPaste }, set: { value in
                         if value { pasteDisclosure = true } else { model.compatibilityPaste = false }
@@ -373,12 +378,42 @@ struct SettingsView: View {
                 }
                 Button("Keep them", role: .cancel) { pendingRetention = nil }
             } message: { Text("Removed dictations cannot be recovered.") }
+            .confirmationDialog(model.savedMeetingCount == 1 ? "Delete the saved meeting?" : "Delete all \(model.savedMeetingCount) saved meetings?",
+                                isPresented: $confirmingMeetingsDelete) {
+                Button("Delete meetings", role: .destructive, action: model.deleteAllMeetings)
+                Button("Keep meetings", role: .cancel) {}
+            } message: {
+                Text("Their transcripts and notes will be removed from this Mac. It cannot be undone. Within keeps meetings out of Time Machine backups; other backup apps may still have copies.")
+            }
             .confirmationDialog("Enable compatibility paste?", isPresented: $pasteDisclosure) {
                 Button("Enable compatibility paste") { model.compatibilityPaste = true }
                 Button("Keep it off", role: .cancel) {}
             } message: {
                 Text("Your words will temporarily enter the clipboard. Other apps, clipboard managers, and Universal Clipboard may read or sync them. Clipboard restoration is best effort; you must review the insertion result.")
             }
+    }
+    private var savedMeetings: some View {
+        let count = model.savedMeetingCount
+        let kept = model.meetingRetention == .untilDeleted ? "Kept until you delete them"
+            : "Each is deleted \(model.meetingRetention.title) after it was last transcribed"
+        let title = model.meetingsUnlistable ? "Saved meetings couldn’t be listed on this Mac."
+            : count == 1 ? "1 meeting is saved on this Mac." : "\(count) meetings are saved on this Mac."
+        let detail = model.meetingsUnlistable ? "From the Meetings developer preview. Show the folder in Finder to check its permissions."
+            : "From the Meetings developer preview. \(kept), and left out of Time Machine backups."
+        return VStack(alignment: .leading, spacing: 12) {
+            row(title, detail: detail) {
+                HStack(spacing: 8) {
+                    Button("Show in Finder", action: model.showMeetingsInFinder).quietAction()
+                    // Only meetings that could be counted can be deleted together.
+                    if !model.meetingsUnlistable {
+                        Button("Delete all…", role: .destructive) { confirmingMeetingsDelete = true }.quietAction()
+                    }
+                }
+            }
+            if !model.meetingsMessage.isEmpty {
+                Text(model.meetingsMessage).font(.system(size: 12)).foregroundStyle(Palette.warning)
+            }
+        }.withinSurface(padding: 16)
     }
     /// Shortening retention or turning history off asks before anything is deleted.
     private func requestRetention(_ retention: HistoryRetention) {
