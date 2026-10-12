@@ -426,6 +426,23 @@ final class MeetingsTests: XCTestCase {
         XCTAssertEqual(detector.observe(inCall, now: now, captureActive: false), [.offer(.zoom)])
     }
 
+    func testCallThatStartedDuringCaptureIsNotOfferedOnceCaptureEnds() {
+        var detector = MeetingDetector(enabled: true, confirmations: 2, withdrawConfirmations: 3)
+        let inCall = [AudioClientSnapshot(bundleID: "us.zoom.xos", runningInput: true)]
+        for _ in 0..<2 { XCTAssertEqual(detector.observe(inCall, now: now, captureActive: true), []) }
+        XCTAssertEqual(detector.observe(inCall, now: now, captureActive: false), [])
+        for _ in 0..<2 { XCTAssertEqual(detector.observe([], now: now, captureActive: false), []) }
+        XCTAssertEqual(detector.observe([], now: now, captureActive: false), [.withdraw(.zoom)])
+        XCTAssertEqual(detector.observe(inCall, now: now, captureActive: false), [])
+        XCTAssertEqual(detector.observe(inCall, now: now, captureActive: false), [.offer(.zoom)])
+    }
+
+    func testZoomOnlyDetectorNeverOffersTeams() {
+        var detector = MeetingDetector(enabled: true, apps: [.zoom], confirmations: 2, withdrawConfirmations: 3)
+        let teams = [AudioClientSnapshot(bundleID: "com.microsoft.teams2", runningInput: true)]
+        for _ in 0..<3 { XCTAssertEqual(detector.observe(teams, now: now, captureActive: false), []) }
+    }
+
     func testReminderHidesOnWithdrawLockCaptureStartOrRemindersOff() {
         for (event, effects) in [(MeetingReminderState.Event.withdraw(.zoom), [MeetingReminderState.Effect]()),
                                  (.lockOrSleep, [.dismissCall(.zoom)]), (.captureStarted, [.dismissCall(.zoom)]), (.remindersOff, [])] {

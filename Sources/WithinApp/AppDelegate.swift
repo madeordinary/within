@@ -5,12 +5,18 @@ import Darwin
 import Carbon
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuItemValidation, NSMenuDelegate {
     private var model: AppModel!
     private var mainWindow: NSWindow?
     private let navigation = AppNavigation()
     private var deferredRecovery = false
     private var pill: NSPanel?
+    private var reminderPanel: ReminderPanel?
+    private var startSheet: NSWindow?
+    private var capsule: RecordingPanel?
+    private var capsuleShown = false
+    /// The status menu's meeting and reminder items; they exist only while the Meetings space is visible.
+    private var meetingStatusItems: MeetingStatusItems?
     private var statusItem: NSStatusItem?
     private var actionItem: NSMenuItem?
     private var cancelItem: NSMenuItem?
@@ -50,6 +56,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                     appIsActive: NSApp.isActive, hasDialog: navigationBlocked)
             }
             model.showRecovery = { [weak self] in self?.showRecoveryWindow() }
+            model.showMeetings = { [weak self] in self?.navigate(to: .meetings) }
+            model.showWindow = { [weak self] in
+                guard let self else { return }
+                ensureMainWindow(); present(mainWindow)
+            }
             model.dismissRecovery = { [weak self] in self?.dismissRecovery() }
             model.stateChanged = { [weak self] in self?.refreshStatus() }
             makeMenu()
@@ -75,6 +86,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         }
     }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showMainWindow(); return true }
+    /// The meeting capsule shows only while another app is in front. Within in front also means no lock is in the way, in
+    /// case the unlock wasn't heard.
+    func applicationDidBecomeActive(_ notification: Notification) {
+        guard model != nil else { return }
+        model.meetingWatcher.boundaryEnded()
+        refreshMeetingCapsule()
+    }
+    func applicationDidResignActive(_ notification: Notification) { if model != nil { refreshMeetingCapsule() } }
+    /// A display added, removed or rearranged, or the menu bar or Dock changed: the capsule and reminder go back top-right.
+    func applicationDidChangeScreenParameters(_ notification: Notification) { if model != nil { placeMeetingPanels() } }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard let model else { return .terminateNow }
@@ -141,8 +162,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private func makeMenu() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         statusItem?.button?.image = NSImage(systemSymbolName: "waveform", accessibilityDescription: "Within")
+        statusItem?.menu = makeStatusMenu(for: model)
+        makeApplicationMenu()
+    }
+    /// The menu bar item's menu. Its meeting and reminder items exist only while the Meetings space is visible, so with
+    /// the developer default off it is dictation's menu alone. Native checks build it without a status item.
+    func makeStatusMenu(for model: AppModel) -> NSMenu {
+        self.model = model
         let menu = NSMenu(); menu.autoenablesItems = false
         let title = NSMenuItem(title: "Within, by Made Ordinary", action: nil, keyEquivalent: ""); title.isEnabled = false; menu.addItem(title)
+        if model.showsMeetingsSpace {
+            let items = MeetingStatusItems(line: { NSMenuItem(title: $0, action: nil, keyEquivalent: "") }, item: { self.item($0, $1) })
+            items.all.forEach(menu.addItem)
+            meetingStatusItems = items
+            // The meeting's time is read as the menu opens; nothing ticks while it is closed.
+            menu.delegate = self
+        }
         actionItem = item("Start Dictation", #selector(toggleDictation)); menu.addItem(actionItem!)
         cancelItem = item("Cancel Dictation", #selector(cancelDictation)); menu.addItem(cancelItem!)
         reviewItem = item("Review Pending Words…", #selector(reviewWords)); menu.addItem(reviewItem!)
@@ -150,11 +185,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         menu.addItem(.separator()); menu.addItem(item("Open Within…", #selector(openWithin)))
         quitItem = item("Quit Within", #selector(quit))
         menu.addItem(.separator()); menu.addItem(quitItem!)
-        statusItem?.menu = menu
         menu.insertItem(item("Settings…", #selector(openSettings)), at: menu.numberOfItems - 2)
         menu.insertItem(item("Within Help", #selector(openHelp)), at: menu.numberOfItems - 2)
-        makeApplicationMenu()
+        refreshStatusMenu()
+        return menu
     }
+    func menuWillOpen(_ menu: NSMenu) { refreshStatusMenu() }
     private func makeApplicationMenu() {
         let menu = NSMenu()
         let root = NSMenuItem(title: "Within", action: nil, keyEquivalent: "")
@@ -248,6 +284,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Task { await model.discardMeeting() }
     }
     @objc private func allMeetings() { if navigate(to: .meetings) { model.showAllMeetings() } }
+    // The status menu's meeting items work from another app: none brings Within forward except Show, Discard's
+    // confirmation, Start Zoom Notes… and a Resume that needs the meeting's acknowledgment.
+    @objc fileprivate func statusPauseOrResume() { if model.meetings.phase == .paused { model.resumeOpenMeeting() } else { model.pauseOpenMeeting() } }
+    @objc fileprivate func statusFinishMeeting() { model.finishOpenMeeting() }
+    @objc fileprivate func statusDiscardMeeting() { NSApp.activate(ignoringOtherApps: true); discardMeeting() }
+    @objc fileprivate func statusShowMeeting() { model.showOpenMeeting() }
+    @objc fileprivate func statusStartReminderNotes() { model.openMeetingStartSheet() }
+    @objc fileprivate func statusSnoozeReminders() { model.reminderSnooze() }
+    @objc fileprivate func statusDismissReminder() { model.reminderDismiss() }
 
     enum MeetingMenuAction { case newMeeting, pauseOrResume, finish, discard, allMeetings }
     struct MeetingMenuState: Equatable {
@@ -425,9 +470,52 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         navigate(to: .recovery)
     }
     private func refreshStatus() {
+        let look = Self.statusAppearance(model)
+        statusItem?.button?.image = NSImage(systemSymbolName: look.symbol, accessibilityDescription: look.description)
+        statusItem?.button?.toolTip = look.toolTip
+        refreshStatusMenu()
+        if Self.showsPill(model) {
+            if pill == nil {
+                let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: PillView.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+                panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
+                panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; panel.hidesOnDeactivate = false
+                panel.contentView = NSHostingView(rootView: PillView(model: model)); pill = panel
+            }
+            if let frame = NSScreen.main?.visibleFrame { pill?.setFrameOrigin(NSPoint(x: frame.midX - PillView.width / 2, y: frame.minY + 28)) }
+            pill?.orderFrontRegardless()
+        } else { pill?.orderOut(nil) }
+        refreshMeetingCapsule()
+        refreshReminderPanel()
+        refreshMeetingStartSheet()
+    }
+    /// The pill belongs to dictation only; a note or a meeting shows its recording elsewhere.
+    static func showsPill(_ model: AppModel) -> Bool { model.activeCapture == .dictation }
+    struct StatusAppearance: Equatable { let symbol: String, description: String, toolTip: String }
+    /// The status item's symbol, the sentence VoiceOver reads for it and its tooltip. A meeting says its own state, so a
+    /// paused meeting never looks like dictation waiting.
+    static func statusAppearance(_ model: AppModel) -> StatusAppearance {
+        guard model.activeCapture == .meeting else {
+            let recording = model.phase == .recording
+            return StatusAppearance(symbol: recording ? "mic.fill" : "waveform", description: recording ? "Within. Microphone on." : "Within. Microphone off.",
+                                    toolTip: recording ? "Within · recording" : "Within · microphone off")
+        }
+        let meetings = model.meetings, app = meetings.meeting?.appName ?? MeetingApp.zoom.name
+        let on = model.phase == .recording
+        switch meetings.phase {
+        case .recording where on && [.quiet, .lost].contains(meetings.sourceStates[.others]):
+            return StatusAppearance(symbol: "mic.fill", description: "Within. Meeting notes on, not hearing \(app).", toolTip: "Within · not hearing \(app)")
+        case .recording where on: return StatusAppearance(symbol: "mic.fill", description: "Within. Meeting notes on.", toolTip: "Within · meeting notes on")
+        case .paused: return StatusAppearance(symbol: "mic.slash", description: "Within. Meeting notes paused. Microphone off.", toolTip: "Within · meeting notes paused")
+        case .preparing: return StatusAppearance(symbol: on ? "mic.fill" : "mic.slash", description: "Within. Meeting notes starting.", toolTip: "Within · meeting notes starting")
+        default:
+            // Pausing, finishing or discarding: the words Home uses.
+            let state = meetings.homeStatus
+            return StatusAppearance(symbol: on ? "mic.fill" : "mic.slash", description: "Within. \(state).", toolTip: "Within · \(state.prefix(1).lowercased() + state.dropFirst())")
+        }
+    }
+    /// The status menu's items for the state now. With the developer default off, only dictation's.
+    private func refreshStatusMenu() {
         let active = model.phase == .preparing || model.phase == .recording || model.phase == .transcribing
-        statusItem?.button?.image = NSImage(systemSymbolName: model.phase == .recording ? "mic.fill" : "waveform", accessibilityDescription: model.phase == .recording ? "Within. Microphone on." : "Within. Microphone off.")
-        statusItem?.button?.toolTip = model.phase == .recording ? "Within · recording" : "Within · microphone off"
         actionItem?.title = model.isRecordingNote ? "Stop Note Recording" : model.isActive ? "Stop and Transcribe" : "Start Dictation"
         actionItem?.isEnabled = model.isActive || model.canStartDictation
         cancelItem?.isEnabled = active
@@ -438,17 +526,78 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         originalItem?.isHidden = model.lastDictationChange == nil
         quitItem?.title = finishingMeetingToQuit ? Self.finishingTitle : "Quit Within"
         quitItem?.isEnabled = !finishingMeetingToQuit
-        // The pill belongs to dictation only; a note or a meeting shows its recording elsewhere.
-        if model.activeCapture == .dictation {
-            if pill == nil {
-                let panel = RecordingPanel(contentRect: NSRect(x: 0, y: 0, width: PillView.width, height: PillView.height), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
-                panel.level = .floating; panel.isOpaque = false; panel.backgroundColor = .clear; panel.hasShadow = true
-                panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]; panel.hidesOnDeactivate = false
-                panel.contentView = NSHostingView(rootView: PillView(model: model)); pill = panel
-            }
-            if let frame = NSScreen.main?.visibleFrame { pill?.setFrameOrigin(NSPoint(x: frame.midX - PillView.width / 2, y: frame.minY + 28)) }
-            pill?.orderFrontRegardless()
-        } else { pill?.orderOut(nil) }
+        guard let items = meetingStatusItems else { return }
+        let meetings = model.meetings, lines = model.meetingMenuLines
+        let open = lines != nil, recovered = !meetings.isOpen && !model.meetingsToReview.isEmpty
+        // The time and what the meeting is doing, or the one-time line after Within closed unexpectedly during one.
+        items.title.isHidden = !open && !recovered
+        items.title.title = lines?.title ?? "Meeting notes were interrupted"
+        items.title.setAccessibilityLabel(lines?.spoken)
+        items.detail.isHidden = !open; items.detail.title = lines?.detail ?? ""
+        for (menuItem, action) in [(items.pauseOrResume, MeetingMenuAction.pauseOrResume), (items.finish, .finish), (items.discard, .discard)] {
+            let state = Self.meetingMenuState(action, model: model, page: navigation.page)
+            menuItem.isHidden = !open; menuItem.title = state.title; menuItem.isEnabled = state.enabled; menuItem.toolTip = state.reason
+        }
+        items.show.isHidden = !open && !recovered; items.show.title = open ? "Show Meeting" : "Show Meetings"
+        // The reminder's keyboard path: Zoom keeps focus, so these are reachable with Control-F8 or VoiceOver.
+        let reminder = model.meetingReminder
+        for menuItem in [items.reminderStart, items.reminderSnooze, items.reminderDismiss] { menuItem.isHidden = reminder == nil }
+        items.reminderStart.title = "Start \(reminder?.app.name ?? MeetingApp.zoom.name) Notes…"
+        let dictation = [actionItem, cancelItem, reviewItem, originalItem].contains { $0?.isHidden == false }
+        items.groupSeparator.isHidden = !((open || recovered) && reminder != nil)
+        items.dictationSeparator.isHidden = !((open || recovered || reminder != nil) && dictation)
+    }
+    /// The reminder floats top-right while one is offered, ordered front but never made key, so the call keeps focus. It is
+    /// placed again once SwiftUI has laid out a change, such as the first-time explanation, so it grows downward.
+    private func refreshReminderPanel() {
+        guard model.meetingReminder != nil else { reminderPanel?.orderOut(nil); return }
+        let panel = reminderPanel ?? ReminderPanel(content: ReminderHostingView(rootView: ReminderView(model: model, watcher: model.meetingWatcher, meetings: model.meetings)))
+        reminderPanel = panel
+        placeMeetingPanels()
+        panel.orderFrontRegardless()
+        DispatchQueue.main.async { [weak self] in
+            guard let self, model.meetingReminder != nil else { return }
+            placeMeetingPanels()
+        }
+    }
+    /// The capsule while a meeting is open and another app is in front, ordered front but never key. Its controls are
+    /// also in the status menu.
+    private func refreshMeetingCapsule() {
+        capsuleShown = model.meetingCapsuleShown(appIsActive: NSApp.isActive)
+        if capsuleShown, capsule == nil {
+            capsule = RecordingPanel.meetingCapsule(content: NSHostingView(rootView: MeetingCapsuleView(model: model, meetings: model.meetings) { [weak self] in
+                DispatchQueue.main.async { self?.placeMeetingPanels() }
+            }))
+        }
+        placeMeetingPanels()
+        if capsuleShown { capsule?.orderFrontRegardless() } else { capsule?.orderOut(nil) }
+    }
+    /// Top-right under the menu bar: the capsule first, and a reminder shown with it below it.
+    private func placeMeetingPanels() {
+        var top: CGFloat?
+        if capsuleShown, let capsule { capsule.placeTopRight(on: NSScreen.main); top = capsule.frame.minY - 8 }
+        if model.meetingReminder != nil { reminderPanel?.place(on: NSScreen.main, below: top) }
+    }
+    /// The reminder's menu path: a sheet on Within's window while the model asks for one. It closes with its reminder,
+    /// and Cancel or Escape starts nothing. Another sheet already there means it isn't shown, with a beep and a sentence.
+    private func refreshMeetingStartSheet() {
+        guard model.meetingStartSheet else {
+            if let startSheet { self.startSheet = nil; startSheet.sheetParent?.endSheet(startSheet) }
+            return
+        }
+        guard startSheet == nil else { return }
+        guard let mainWindow, mainWindow.attachedSheet == nil, NSApp.modalWindow == nil else {
+            NSSound.beep(); model.meetingStartSheetUnavailable(); return
+        }
+        let controller = NSHostingController(rootView: MeetingStartSheet(model: model, watcher: model.meetingWatcher, meetings: model.meetings))
+        controller.sizingOptions = [.preferredContentSize]
+        let sheet = NSWindow(contentViewController: controller)
+        startSheet = sheet
+        mainWindow.beginSheet(sheet) { [weak self] _ in
+            guard let self, startSheet === sheet else { return }
+            startSheet = nil
+            model.closeMeetingStartSheet()
+        }
     }
 }
 
@@ -463,4 +612,24 @@ func applicationDirectory() throws -> URL {
 final class RecordingPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
+}
+
+/// The status menu's meeting group, its reminder group and their separators, in menu order.
+struct MeetingStatusItems {
+    let title, detail, pauseOrResume, finish, discard, show, groupSeparator, reminderStart, reminderSnooze, reminderDismiss, dictationSeparator: NSMenuItem
+    var all: [NSMenuItem] { [title, detail, pauseOrResume, finish, discard, show, groupSeparator, reminderStart, reminderSnooze, reminderDismiss, dictationSeparator] }
+
+    @MainActor init(line: (String) -> NSMenuItem, item: (String, Selector) -> NSMenuItem) {
+        title = line("Meeting"); detail = line("")
+        title.isEnabled = false; detail.isEnabled = false
+        pauseOrResume = item("Pause Meeting", #selector(AppDelegate.statusPauseOrResume))
+        finish = item("Finish Meeting", #selector(AppDelegate.statusFinishMeeting))
+        discard = item("Discard Meeting…", #selector(AppDelegate.statusDiscardMeeting))
+        show = item("Show Meeting", #selector(AppDelegate.statusShowMeeting))
+        reminderStart = item("Start Zoom Notes…", #selector(AppDelegate.statusStartReminderNotes))
+        reminderSnooze = item("Snooze Reminders for 1 Hour", #selector(AppDelegate.statusSnoozeReminders))
+        reminderDismiss = item("Dismiss Reminder", #selector(AppDelegate.statusDismissReminder))
+        groupSeparator = .separator(); dictationSeparator = .separator()
+        all.forEach { $0.isHidden = true }
+    }
 }

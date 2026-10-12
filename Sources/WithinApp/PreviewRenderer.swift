@@ -38,7 +38,13 @@ func renderPreviews(to directory: URL) throws {
                   "meeting-recording", "meeting-recording-720", "meeting-recording-900", "meeting-paused", "meeting-resume-acknowledge",
                   "meeting-call-ended", "meeting-recovered", "meeting-finished", "meeting-dictionary-fixes", "home-during-meeting",
                   "meetings-library-720", "meeting-finished-720", "meeting-setup-not-saved", "settings-meetings-backups-off",
-                  "settings-privacy-saved-meetings-backups-off", "settings-privacy-saved-meetings-backup-failed"] {
+                  "settings-privacy-saved-meetings-backups-off", "settings-privacy-saved-meetings-backup-failed",
+                  "meeting-reminder", "meeting-reminder-first", "meeting-reminder-first-audio", "meeting-reminder-while-paused", "meeting-reminder-not-ready",
+                  "meeting-reminder-increase-contrast", "meeting-reminder-reduce-motion", "meeting-menu-start-sheet", "meeting-menu-start-sheet-first-audio",
+                  "settings-meetings-reminders", "settings-meetings-reminders-unsupported",
+                  "meeting-capsule-recording", "meeting-capsule-first-minute", "meeting-capsule-paused", "meeting-capsule-after-unlock",
+                  "meeting-capsule-not-hearing", "meeting-capsule-source-lost", "meeting-capsule-dictation-refused", "meeting-capsule-dictation-refused-paused",
+                  "meeting-capsule-increase-contrast", "meeting-capsule-reduce-motion", "meeting-capsule-resume-blocked"] {
         let model = AppModel(manifest: manifest, base: directory.appendingPathComponent("unused"), preview: true)
         model.configurePreview(state)
         if state == "practice-empty" || state == "history" {
@@ -66,9 +72,9 @@ func renderPreviews(to directory: URL) throws {
                 // The developer preview's saved meetings while the space is hidden: the only meeting line in Settings.
                 model.settingsSection = "Privacy"
                 try render(name, view: shell(model, .settings), size: shellSize, dark: dark)
-            case "settings-meetings", "settings-meetings-backups", "settings-meetings-backups-off":
+            case "settings-meetings", "settings-meetings-backups", "settings-meetings-backups-off", "settings-meetings-reminders", "settings-meetings-reminders-unsupported":
                 model.settingsSection = "Meetings"
-                try render(name, view: shell(model, .settings), size: NSSize(width: 900, height: 880), dark: dark)
+                try render(name, view: shell(model, .settings), size: NSSize(width: 900, height: 1060), dark: dark)
                 if state == "settings-meetings" {
                     // The copy the developer default adds to other pages.
                     for section in ["Audio", "Privacy"] {
@@ -77,6 +83,22 @@ func renderPreviews(to directory: URL) throws {
                     }
                     try render("within-help-with-meetings\(dark ? "-dark" : "")", view: shell(model, .help), size: NSSize(width: 900, height: 1000), dark: dark)
                 }
+            // The reminder panel and the menu path's sheet at their own sizes. Increase Contrast and Reduce Motion are set in the
+            // environment, as the system would set them.
+            case _ where state.hasPrefix("meeting-reminder"):
+                var reminder = AnyView(ReminderView(model: model, watcher: model.meetingWatcher, meetings: model.meetings))
+                if state.hasSuffix("increase-contrast") { reminder = AnyView(reminder.environment(\._colorSchemeContrast, .increased)) }
+                if state.hasSuffix("reduce-motion") { reminder = AnyView(reminder.environment(\._accessibilityReduceMotion, true)) }
+                try render(name, view: reminder, size: NSHostingView(rootView: reminder).fittingSize, dark: dark)
+            // The meeting capsule at its own size, as another app in front would see it.
+            case _ where state.hasPrefix("meeting-capsule"):
+                var capsule = AnyView(MeetingCapsuleView(model: model, meetings: model.meetings))
+                if state.hasSuffix("increase-contrast") { capsule = AnyView(capsule.environment(\._colorSchemeContrast, .increased)) }
+                if state.hasSuffix("reduce-motion") { capsule = AnyView(capsule.environment(\._accessibilityReduceMotion, true)) }
+                try render(name, view: capsule, size: NSHostingView(rootView: capsule).fittingSize, dark: dark)
+            case "meeting-menu-start-sheet", "meeting-menu-start-sheet-first-audio":
+                let sheet = MeetingStartSheet(model: model, watcher: model.meetingWatcher, meetings: model.meetings)
+                try render(name, view: sheet, size: NSHostingView(rootView: sheet).fittingSize, dark: dark)
             case "meeting-setup", "meeting-setup-computer-audio-intro", "meeting-mic-only", "meeting-setup-not-saved":
                 try render(name, view: shell(model, .meetings), size: NSSize(width: 900, height: 1000), dark: dark)
             case "meeting-recording": try render(name, view: shell(model, .meetings), size: NSSize(width: 1100, height: 760), dark: dark)

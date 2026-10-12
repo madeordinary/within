@@ -38,8 +38,10 @@ Sources/WithinApp/CaptureEngine.swift
 Sources/WithinApp/CompatibilityPaste.swift
 Sources/WithinApp/LocalSpeech.swift
 Sources/WithinApp/MeetingController.swift
+Sources/WithinApp/MeetingPanels.swift
 Sources/WithinApp/MeetingSessionFixture.swift
 Sources/WithinApp/MeetingSources.swift
+Sources/WithinApp/MeetingWatcher.swift
 Sources/WithinApp/MeetingsView.swift
 Sources/WithinApp/ModelStore.swift
 Sources/WithinApp/ModelStoreCheck.swift

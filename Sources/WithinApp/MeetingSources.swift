@@ -19,6 +19,8 @@ import WithinCore
 @MainActor enum MeetingSourceAudit {
     static var microphoneStarts = 0
     static var appAudioStarts = 0
+    /// Reads of the audio process list by the reminder watcher. Native checks never cause one.
+    static var audioClientReads = 0
 }
 
 /// You: the shared capture engine with meeting limits. AppModel keeps the engine's one configuration handler

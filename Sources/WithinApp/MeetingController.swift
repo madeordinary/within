@@ -122,6 +122,14 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     static let quitWatchdog: Duration = .seconds(10)
 
     let preview: Bool
+    /// Previews only: each finish, start, pause and resume asked for, in order. Nothing starts or pauses, and a finish
+    /// only marks the meeting finished.
+    enum PreviewRequest: Equatable { case finish, start(app: MeetingApp?, acknowledged: Bool), pause, resume(acknowledged: Bool, microphoneOnly: Bool) }
+    private(set) var previewRequests: [PreviewRequest] = []
+    /// Previews only: a start asked for reports success, as one that began would; nothing starts either way.
+    var previewStartsAccepted = false
+    /// Previews only: run while a finish is under way, before the meeting is marked finished.
+    var previewFinishing: (@MainActor () -> Void)?
     private(set) var checkpointsWritten = 0
     private(set) var checkpointFailures = 0
     /// Whether the latest stretch's health monitor runs the Others first-audio and stall rules.
@@ -183,7 +191,8 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
 
     /// A new meeting, saved before anything starts. The acknowledgment is asked for every meeting.
     @discardableResult func start(title: String = "", app: MeetingApp?, acknowledged: Bool) -> Bool {
-        guard !preview, let host, !lifecycle.isOpen, quiescent, mayReplaceShown() else { return false }
+        if preview { previewRequests.append(.start(app: app, acknowledged: acknowledged)); return previewStartsAccepted }
+        guard let host, !lifecycle.isOpen, quiescent, mayReplaceShown() else { return false }
         if let reason = host.meetingStartRefusal() { refuse(reason); return false }
         guard acknowledged else { refuse(Self.acknowledgmentMessage); return false }
         adopt(Meeting(title: title, created: Date(), appName: app?.name ?? Meeting.microphoneOnly), app: app, finished: false)
@@ -213,6 +222,7 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     }
 
     func pause() {
+        if preview { previewRequests.append(.pause); return }
         notice = nil
         send(.pause)
     }
@@ -220,7 +230,8 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     /// After a call end, lock, sleep, user switch, lost app process or a long pause, this needs a new
     /// acknowledgment. `microphoneOnly` drops the app's sound from this and later stretches.
     @discardableResult func resume(acknowledged: Bool, microphoneOnly: Bool = false) -> Bool {
-        guard !preview, let host, lifecycle.phase == .paused else { return false }
+        if preview { previewRequests.append(.resume(acknowledged: acknowledged, microphoneOnly: microphoneOnly)); return false }
+        guard let host, lifecycle.phase == .paused else { return false }
         if let reason = host.meetingStartRefusal() { refuse(reason); return false }
         // Refused before anything changes, so a refused microphone-only resume keeps the app's sound.
         guard acknowledged || !lifecycle.needsAcknowledgment(at: Date()) else { refuse(Self.acknowledgmentMessage); return false }
@@ -239,7 +250,14 @@ final class MeetingCheckpointWriter: @unchecked Sendable {
     }
 
     /// Stops capture, drains and saves. True only once the finished record is on disk (or nothing was kept).
-    func finish() async -> Bool { await end(.finish) }
+    func finish() async -> Bool {
+        guard preview else { return await end(.finish) }
+        previewRequests.append(.finish)
+        previewFinishing?()
+        guard isOpen else { return false }
+        phase = .finished; meeting?.state = .finished
+        return true
+    }
 
     /// A quit's first step, before anything awaits: both sources stop now. `quit()` then drains and saves.
     func stopForQuit() {

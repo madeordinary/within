@@ -12,7 +12,7 @@ private final class RefusingPasteboard: NSPasteboard {
 func nativeChecks(to output: URL) throws {
     _ = NSApplication.shared
     let manifest = try loadManifest()
-    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary", "showMeetingsSpace", "meetingRetention", "meetingBackups"]
+    let preferenceKeys = ["soundsEnabled", "compatibilityPaste", "activationMode", "alternateShortcut", "dictationShortcut", "microphoneUID", "setupComplete", "historyRetention", "automaticUpdateChecks", "lastUpdateCheck", "muteOutputWhileDictating", "outputMuteRecord", "showPersonalDictionary", "showMeetingsSpace", "meetingRetention", "meetingBackups", "meetingReminders"]
     let preferencesBefore = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject }
     func fixture(_ state: String) -> AppModel {
         let model = AppModel(manifest: manifest, base: output.deletingLastPathComponent().appendingPathComponent("unused"), preview: true)
@@ -396,6 +396,9 @@ func nativeChecks(to output: URL) throws {
     func settles(_ condition: () -> Bool) -> Bool {
         let deadline = Date().addingTimeInterval(1)
         while !condition(), Date() < deadline { usleep(5_000) }
+        // Opposite writes to one item less than about a millisecond apart can lose the later one, so the next step
+        // writes no sooner than this, and the state must still hold.
+        usleep(10_000)
         return condition()
     }
     func inBackups(_ url: URL) -> Bool { settles { !excludedMark(url) && !excludedMark(url.deletingLastPathComponent()) } }
@@ -1097,12 +1100,470 @@ func nativeChecks(to output: URL) throws {
         && !AppModel.meetingBackupsWereIncluded(nil) && !AppModel.meetingBackupsWereIncluded(true) && AppModel.meetingBackupsWereIncluded(false)
         && MeetingWords.emptyLibrary(.excluded).contains("kept out of Time Machine backups") && MeetingWords.emptyLibrary(.included).contains("its Time Machine backups")
         && !MeetingWords.emptyLibrary(.unconfirmed).contains("backups")
+    // Meeting reminders. The watcher reads which apps use a microphone only while reminders are on, the space is visible
+    // and it has a reader; previews have none, so nothing here reads the real list. Synthetic readings drive it directly.
+    let readsBeforeReminders = MeetingSourceAudit.audioClientReads
+    let reminderStartsBefore = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    var syntheticReads = 0
+    let reading = MeetingWatcher { syntheticReads += 1; return [] }
+    reading.update(on: false)
+    let offHasNoTask = !reading.isPolling
+    reading.update(on: true)
+    let onPolls = reading.isPolling
+    reading.update(on: false)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.1))
+    let hiddenStored = fixture("reminders-on-space-hidden")
+    let hiddenRefused = fixture("ready")
+    hiddenRefused.setMeetingReminders(true)
+    let shownSettings = fixture("settings-meetings")
+    let offByDefault = !shownSettings.meetingReminders && !shownSettings.meetingRemindersActive && !shownSettings.meetingWatcher.isOn
+    shownSettings.setMeetingReminders(true)
+    let previewOnNeverPolls = shownSettings.meetingReminders && shownSettings.meetingRemindersActive && shownSettings.meetingWatcher.isOn
+        && !shownSettings.meetingWatcher.isPolling
+    shownSettings.setMeetingReminders(false)
+    var previewsNeverPoll = true
+    for state in ["meeting-reminder", "meeting-reminder-while-paused", "meeting-menu-start-sheet", "settings-meetings-reminders", "home-meeting-paused"] {
+        previewsNeverPoll = previewsNeverPoll && !fixture(state).meetingWatcher.isPolling
+    }
+    let meetingRemindersReadOnlyWhileOnPassed = offHasNoTask && onPolls && !reading.isPolling && syntheticReads == 0
+        && hiddenStored.meetingReminders && !hiddenStored.meetingRemindersActive && !hiddenStored.meetingWatcher.isOn && !hiddenStored.meetingWatcher.isPolling
+        && !hiddenRefused.meetingReminders && !hiddenRefused.meetingRemindersActive && offByDefault && previewOnNeverPolls
+        && !shownSettings.meetingRemindersActive && !shownSettings.meetingWatcher.isOn && previewsNeverPoll
+        && fixture("settings-meetings-reminders").meetingRemindersActive && !fixture("settings-meetings-reminders-unsupported").meetingRemindersActive
+    // Two readings in a row offer, three withdraw; dismiss, snooze, lock and a capture each hold for that call; Zoom only.
+    let zoomCall = [AudioClientSnapshot(bundleID: "us.zoom.xos", runningInput: true)]
+    let zoomOpen = [AudioClientSnapshot(bundleID: "us.zoom.xos", runningInput: false, runningOutput: true)]
+    let teamsCall = [AudioClientSnapshot(bundleID: "com.microsoft.teams2", runningInput: true)]
+    let callTime = Date(timeIntervalSince1970: 1_800_000_000)
+    let watcher = MeetingWatcher(read: nil)
+    var capturing = false, reminderChanges = 0
+    watcher.captureActive = { capturing }
+    watcher.onChange = { reminderChanges += 1 }
+    watcher.update(on: true)
+    func feed(_ clients: [AudioClientSnapshot], _ times: Int, at time: Date = callTime) { for _ in 0..<times { watcher.observe(clients, now: time) } }
+    feed(zoomCall, 1)
+    let oneReadingWaits = watcher.shown == nil
+    feed(zoomOpen, 1); feed(zoomCall, 1)
+    let blipIgnored = watcher.shown == nil
+    feed(zoomCall, 1)
+    let offered = watcher.shown?.app == .zoom && watcher.shown?.pausedMeeting == false && reminderChanges == 1
+    feed(zoomCall, 3); feed([], 2)
+    let offeredOnceAndHeld = watcher.shown != nil && reminderChanges == 1
+    feed([], 1)
+    let withdrawn = watcher.shown == nil && reminderChanges == 2
+    feed(zoomCall, 2); watcher.handle(.dismiss, now: callTime); feed(zoomCall, 4)
+    let dismissHeld = watcher.shown == nil
+    feed([], 3); feed(zoomCall, 2)
+    let nextCallOffered = watcher.shown != nil
+    watcher.lockOrSleep(); feed(zoomCall, 3)
+    let lockDismissed = watcher.shown == nil
+    watcher.boundaryEnded()
+    feed([], 3)
+    capturing = true; feed(zoomCall, 3)
+    let noneWhileCapturing = watcher.shown == nil
+    capturing = false; feed(zoomCall, 3)
+    let notBackfilled = watcher.shown == nil
+    feed([], 3); feed(zoomCall, 2)
+    let offeredAfterCapture = watcher.shown != nil
+    watcher.captureStarted(); feed(zoomCall, 3)
+    let captureDismissed = watcher.shown == nil
+    feed([], 3); feed(zoomCall, 2)
+    let shownBeforeOff = watcher.shown != nil
+    watcher.update(on: false)
+    let offHidAtOnce = watcher.shown == nil && !watcher.isPolling
+    feed(zoomCall, 3); watcher.update(on: true); feed(zoomCall, 3)
+    let sameCallNotOfferedAgain = watcher.shown == nil
+    feed([], 3); feed(teamsCall, 3)
+    let zoomOnly = watcher.shown == nil
+    // Snooze: not this call, and no new call for an hour; nothing is offered later for a call it covered.
+    feed(zoomCall, 2); watcher.handle(.snooze, now: callTime); feed(zoomCall, 3); feed([], 3); feed(zoomCall, 2, at: callTime.addingTimeInterval(600))
+    let snoozeHeld = watcher.shown == nil
+    feed(zoomCall, 2, at: callTime.addingTimeInterval(3_700))
+    let notOfferedLater = watcher.shown == nil
+    feed([], 3); feed(zoomCall, 2, at: callTime.addingTimeInterval(3_700))
+    let offeredAfterSnooze = watcher.shown != nil
+    let meetingReminderOffersFromSyntheticReadingsPassed = oneReadingWaits && blipIgnored && offered && offeredOnceAndHeld && withdrawn && dismissHeld
+        && nextCallOffered && snoozeHeld && notOfferedLater && offeredAfterSnooze && lockDismissed && noneWhileCapturing && notBackfilled && offeredAfterCapture
+        && captureDismissed && shownBeforeOff && offHidAtOnce && sameCallNotOfferedAgain && zoomOnly
+    // On the model: what blocks an offer, the paused variant, the content's lines, and an offer that starts nothing.
+    let blockingPassed = ["recording", "note-recording", "home-meeting-recording", "home-meeting-finishing", "recovery", "practice-transcribing"]
+        .allSatisfy { fixture($0).meetingReminderBlocked }
+        && ["ready", "home-meeting-paused", "meeting-paused", "meeting-finished"].allSatisfy { !fixture($0).meetingReminderBlocked }
+    var windowsOpened = 0
+    let plainReminder = fixture("meeting-reminder")
+    plainReminder.showMain = { windowsOpened += 1 }; plainReminder.showWindow = { windowsOpened += 1 }; plainReminder.showMeetings = { windowsOpened += 1 }
+    let plainContent = plainReminder.meetingReminderContent
+    let contentPassed = plainContent?.sources == "Will transcribe: your microphone + Zoom’s sound" && plainContent?.sourcesLink == "Microphone only this time"
+        && plainContent?.blocker == nil && plainContent?.firstTime == false && plainContent?.paused == false
+        && MeetingReminderContent.storage.contains("Muting in Zoom doesn’t pause Within.") && MeetingReminderContent.storage.contains("audio is never kept")
+    let offerStartedNothing = plainReminder.meetingReminder != nil && plainReminder.meetings.previewRequests.isEmpty && plainReminder.phase == .ready && !plainReminder.workerBusy
+        && !plainReminder.meetings.isOpen && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == reminderStartsBefore
+    let pausedOffer = fixture("meeting-reminder-while-paused")
+    let pausedOffered = pausedOffer.meetingReminder?.pausedMeeting == true && pausedOffer.meetingReminderContent?.paused == true
+        && pausedOffer.meetings.previewRequests.isEmpty && pausedOffer.meetings.phase == .paused
+    let meetingReminderOfferStartsNothingPassed = blockingPassed && contentPassed && offerStartedNothing && pausedOffered
+    // Start notes passes the acknowledgment exactly once, with the sources shown, and brings no window forward.
+    let firstStart = plainReminder.reminderStartNotes()
+    _ = finished { await firstStart?.value ?? false }
+    let secondStart = plainReminder.reminderStartNotes()
+    let startedOnce = firstStart != nil && secondStart == nil && plainReminder.meetings.previewRequests == [.start(app: .zoom, acknowledged: true)]
+        && plainReminder.meetingReminder == nil && windowsOpened == 0
+    let linked = fixture("meeting-reminder")
+    linked.toggleReminderZoomSound()
+    let linkedContent = linked.meetingReminderContent
+    let linkedStart = linked.reminderStartNotes()
+    _ = finished { await linkedStart?.value ?? false }
+    let linkThisStartOnly = linkedContent?.sources == "Will transcribe: your microphone only" && linkedContent?.sourcesLink == "Include Zoom’s sound"
+        && linked.meetings.previewRequests == [.start(app: nil, acknowledged: true)] && linked.includeZoomSound
+    let first = fixture("meeting-reminder-first")
+    let firstExplains = first.meetingReminderContent?.firstTime == true && first.meetingReminderContent?.sourcesLink == nil
+        && first.reminderStartNotes() == nil && first.reminderExplaining && first.meetingReminder != nil && first.meetings.previewRequests.isEmpty
+    let firstMicrophone = first.reminderStart(includingZoomSound: false)
+    _ = finished { await firstMicrophone?.value ?? false }
+    let firstMicrophoneOnly = firstExplains && first.meetings.previewRequests == [.start(app: nil, acknowledged: true)] && !first.includeZoomSound
+        && !first.zoomSoundEverIncluded
+    let includingReminder = fixture("meeting-reminder-first")
+    _ = includingReminder.reminderStartNotes()
+    let includingStart = includingReminder.reminderStart(includingZoomSound: true)
+    _ = finished { await includingStart?.value ?? false }
+    let firstIncludes = includingReminder.meetings.previewRequests == [.start(app: .zoom, acknowledged: true)] && includingReminder.includeZoomSound && includingReminder.zoomSoundEverIncluded
+    let pausedStart = pausedOffer.reminderStartNotes()
+    _ = finished { await pausedStart?.value ?? false }
+    let pausedFinishedFirst = pausedOffer.meetings.previewRequests == [.finish, .start(app: .zoom, acknowledged: true)] && pausedOffer.meetings.phase == .finished
+    let notReady = fixture("meeting-reminder-not-ready")
+    let notReadyRefused = finished { await notReady.startMeetingFromReminder(.zoom) } == false
+    let notReadyStartsNothing = notReady.meetingReminderContent?.blocker == "Finish setup before recording." && notReady.reminderStartNotes() == nil
+        && notReady.meetingStartSheetDefault() == nil && notReadyRefused && notReady.meetingReminder != nil && notReady.meetings.previewRequests.isEmpty
+    // Without a reminder, none of its starts does anything, and Zoom's sound stays off.
+    let noReminder = fixture("settings-meetings")
+    let noReminderStartsNothing = noReminder.reminderStart(includingZoomSound: true) == nil && noReminder.reminderStartNotes() == nil
+        && noReminder.meetingStartSheetDefault() == nil && !noReminder.includeZoomSound && noReminder.meetings.previewRequests.isEmpty
+    let meetingReminderStartNotesAcknowledgesOncePassed = startedOnce && linkThisStartOnly && firstMicrophoneOnly && firstIncludes && pausedFinishedFirst
+        && notReadyStartsNothing && noReminderStartsNothing && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == reminderStartsBefore
+    // The menu path: the sheet brings Within forward; Cancel starts nothing; its default never includes Zoom's sound that was
+    // never turned on in this run; it closes when its reminder goes.
+    var sheetWindows = 0
+    let menu = fixture("meeting-reminder-first")
+    menu.showWindow = { sheetWindows += 1 }
+    menu.openMeetingStartSheet()
+    let sheetOpened = menu.meetingStartSheet && sheetWindows == 1
+    menu.closeMeetingStartSheet()
+    let cancelStartedNothing = !menu.meetingStartSheet && menu.meetingReminder != nil && menu.meetings.previewRequests.isEmpty
+    menu.toggleReminderZoomSound(); menu.openMeetingStartSheet()
+    let menuDefault = menu.meetingStartSheetDefault()
+    _ = finished { await menuDefault?.value ?? false }
+    let neverEnabledNeverIncluded = !menu.reminderIncludesZoomSound && menu.meetings.previewRequests == [.start(app: nil, acknowledged: true)]
+        && !menu.meetingStartSheet && menu.meetingReminder == nil
+    let menuEnabled = fixture("meeting-menu-start-sheet")
+    let menuEnabledDefault = menuEnabled.meetingStartSheetDefault()
+    _ = finished { await menuEnabledDefault?.value ?? false }
+    let menuLocked = fixture("meeting-menu-start-sheet")
+    let lockedSheetWasOpen = menuLocked.meetingStartSheet
+    menuLocked.cancelForBoundary()
+    let hidden = fixture("ready")
+    hidden.openMeetingStartSheet()
+    // Another dialog already over Within's window: the sheet isn't shown and nothing starts.
+    let covered = fixture("meeting-menu-start-sheet")
+    covered.meetingStartSheetUnavailable()
+    let coveredStartsNothing = !covered.meetingStartSheet && covered.meetingReminder != nil && covered.meetings.previewRequests.isEmpty
+    let meetingMenuPathNeverIncludesNeverEnabledSoundPassed = sheetOpened && cancelStartedNothing && neverEnabledNeverIncluded && coveredStartsNothing
+        && menuEnabled.meetings.previewRequests == [.start(app: .zoom, acknowledged: true)]
+        && lockedSheetWasOpen && !menuLocked.meetingStartSheet && menuLocked.meetingReminder == nil && menuLocked.meetings.previewRequests.isEmpty
+        && !hidden.meetingStartSheet && hidden.meetingReminder == nil
+    // Lock, a capture starting and turning reminders off each hide it; lock and capture also dismiss that call.
+    let locked = fixture("meeting-reminder")
+    locked.cancelForBoundary()
+    let lockHid = locked.meetingReminder == nil
+    for _ in 0..<3 { locked.meetingWatcher.observe(zoomCall, now: callTime) }
+    let claimed = fixture("meeting-reminder")
+    let claim = claimed.claimCapture()
+    let remindersSwitchedOff = fixture("meeting-reminder")
+    remindersSwitchedOff.setMeetingReminders(false)
+    let meetingReminderHidesOnLockCaptureAndOffPassed = lockHid && locked.meetingReminder == nil && claim != nil && claimed.meetingReminder == nil
+        && remindersSwitchedOff.meetingReminder == nil && !remindersSwitchedOff.meetingWatcher.isOn && !remindersSwitchedOff.meetingReminders
+    // A call already coming up at a lock, or one that comes up before the lock ends, isn't offered afterwards, even when the
+    // lock is shorter than one reading; the next call is, and so is one that starts after unlock.
+    let lockWatcher = MeetingWatcher(read: nil)
+    lockWatcher.update(on: true)
+    func feedAcrossLock(_ clients: [AudioClientSnapshot], _ times: Int) { for _ in 0..<times { lockWatcher.observe(clients, now: callTime) } }
+    feedAcrossLock(zoomCall, 1); lockWatcher.lockOrSleep(); feedAcrossLock(zoomCall, 3)
+    let noneBehindLock = lockWatcher.shown == nil && lockWatcher.heldByBoundary
+    lockWatcher.boundaryEnded(); feedAcrossLock(zoomCall, 3)
+    let notAfterUnlock = lockWatcher.shown == nil && !lockWatcher.heldByBoundary
+    feedAcrossLock([], 3); feedAcrossLock(zoomCall, 2)
+    let nextCallAfterLock = lockWatcher.shown != nil
+    lockWatcher.handle(.dismiss, now: callTime); feedAcrossLock([], 3)
+    feedAcrossLock(zoomCall, 1); lockWatcher.lockOrSleep(); lockWatcher.boundaryEnded(); feedAcrossLock(zoomCall, 3)
+    let notAfterShortLock = lockWatcher.shown == nil
+    feedAcrossLock([], 3); lockWatcher.lockOrSleep(); lockWatcher.boundaryEnded(); feedAcrossLock([], 1); feedAcrossLock(zoomCall, 2)
+    let offeredAfterUnlock = lockWatcher.shown != nil
+    // On the model, a lock with no reminder showing holds the watcher too.
+    let lockedEarly = fixture("settings-meetings-reminders")
+    lockedEarly.meetingWatcher.observe(zoomCall, now: callTime); lockedEarly.cancelForBoundary()
+    for _ in 0..<3 { lockedEarly.meetingWatcher.observe(zoomCall, now: callTime) }
+    let meetingReminderNotBackfilledAcrossLockPassed = noneBehindLock && notAfterUnlock && nextCallAfterLock && notAfterShortLock && offeredAfterUnlock
+        && lockedEarly.meetingWatcher.heldByBoundary && lockedEarly.meetingReminder == nil
+    // A lock, sleep, user switch or quit while Start notes finishes a paused meeting: that meeting is finished, nothing
+    // starts, since the click came before it, and Within stays where it is.
+    var cancelledWindows = 0
+    let lockedWhileFinishing = fixture("meeting-reminder-while-paused"), quitWhileFinishing = fixture("meeting-reminder-while-paused")
+    lockedWhileFinishing.meetings.previewFinishing = { [weak lockedWhileFinishing] in lockedWhileFinishing?.cancelForBoundary() }
+    quitWhileFinishing.meetings.previewFinishing = { [weak quitWhileFinishing] in _ = quitWhileFinishing?.finishMeetingForQuit() }
+    var cancelledStarts: [Bool?] = []
+    for model in [lockedWhileFinishing, quitWhileFinishing] {
+        model.showMeetings = { cancelledWindows += 1 }; model.showMain = { cancelledWindows += 1 }; model.showWindow = { cancelledWindows += 1 }
+        let start = model.reminderStartNotes()
+        cancelledStarts.append(start == nil ? nil : finished { await start!.value })
+    }
+    let meetingReminderStartCancelledByBoundaryOrQuitPassed = cancelledStarts == [false, false] && cancelledWindows == 0
+        && [lockedWhileFinishing, quitWhileFinishing].allSatisfy { $0.meetings.previewRequests == [.finish] && $0.meetings.phase == .finished && $0.meetingReminder == nil }
+    // Notes that can't start once the reminder has closed: Within comes forward on New meeting, which says why. Not after a
+    // lock, and not once that meeting went on.
+    var failureWindows = 0
+    let refusedAfterHide = fixture("meeting-reminder")
+    refusedAfterHide.showMeetings = { failureWindows += 1 }; refusedAfterHide.showMain = { failureWindows += 100 }; refusedAfterHide.showWindow = { failureWindows += 100 }
+    refusedAfterHide.meetings.previewStartsAccepted = false
+    let refusedStart = refusedAfterHide.reminderStartNotes()
+    let refusedStarted = refusedStart == nil ? nil : finished { await refusedStart!.value }
+    let refusedShown = refusedStarted == false && failureWindows == 1 && refusedAfterHide.meetingsRoute == .setup
+        && refusedAfterHide.meetingSetupFailure == AppModel.meetingStartFailed && refusedAfterHide.meetingReminder == nil
+        && refusedAfterHide.meetings.previewRequests == [.start(app: .zoom, acknowledged: true)]
+    let laterFailure = MeetingWords.startFailure(.microphoneLost, appName: MeetingApp.zoom.name)
+    let failedLater = fixture("meeting-reminder"), lockedLater = fixture("meeting-reminder"), wentOn = fixture("meeting-reminder")
+    var laterWindows = 0
+    for model in [failedLater, lockedLater, wentOn] {
+        model.showMeetings = { laterWindows += 1 }
+        let start = model.reminderStartNotes()
+        _ = finished { await start?.value ?? false }
+    }
+    lockedLater.cancelForBoundary()
+    failedLater.reminderStartClosed(failure: laterFailure); lockedLater.reminderStartClosed(failure: laterFailure)
+    wentOn.reminderStartClosed(failure: nil); wentOn.reminderStartClosed(failure: laterFailure)
+    let laterShown = laterWindows == 1 && failedLater.meetingsRoute == .setup && failedLater.meetingSetupFailure == laterFailure
+        && lockedLater.meetingsRoute == .meeting && wentOn.meetingsRoute == .meeting && wentOn.meetingSetupFailure == nil
+    let meetingReminderStartFailureComesForwardPassed = refusedShown && laterShown
+    // The panel floats on every space and can become key only when clicked into; it is never ordered front here.
+    let panel = ReminderPanel(content: NSView())
+    let meetingReminderPanelNeverTakesFocusPassed = panel.canBecomeKey && panel.becomesKeyOnlyIfNeeded && !panel.canBecomeMain
+        && panel.styleMask.contains(.nonactivatingPanel) && panel.level == .floating && panel.collectionBehavior.contains(.canJoinAllSpaces)
+        && panel.collectionBehavior.contains(.fullScreenAuxiliary) && !panel.hidesOnDeactivate && !panel.isVisible && !panel.isKeyWindow
+        && panel.animationBehavior == .none && panel.title == MeetingReminderContent.accessibilityName
+    // A click into it makes it key, and that click still acts: each point of the reminder is its own view, which asks for
+    // key and takes the first click, or a link AppKit draws, which takes it too. Laid out, never shown.
+    let keyModel = fixture("meeting-reminder")
+    let keyHost = ReminderHostingView(rootView: ReminderView(model: keyModel, watcher: keyModel.meetingWatcher, meetings: keyModel.meetings))
+    let keyPanel = ReminderPanel(content: keyHost)
+    RunLoop.main.run(until: Date().addingTimeInterval(0.2))
+    keyHost.frame = NSRect(origin: .zero, size: keyHost.fittingSize); keyHost.layoutSubtreeIfNeeded()
+    var hostHits = 0, otherHits = 0, swallowed = 0
+    for x in stride(from: CGFloat(1), to: keyHost.frame.width, by: 6) {
+        for y in stride(from: CGFloat(1), to: keyHost.frame.height, by: 4) {
+            guard let view = keyHost.hitTest(NSPoint(x: x, y: y)) else { continue }
+            if view === keyHost { hostHits += 1 } else if view.acceptsFirstMouse(for: nil) { otherHits += 1 } else { swallowed += 1 }
+        }
+    }
+    let meetingReminderClickGivesKeyboardFocusPassed = keyHost.needsPanelToBecomeKey && keyHost.acceptsFirstMouse(for: nil) && hostHits > otherHits && swallowed == 0
+        && keyPanel.contentView === keyHost && keyPanel.becomesKeyOnlyIfNeeded && !keyPanel.isVisible && !keyPanel.isKeyWindow && keyModel.meetings.previewRequests.isEmpty
+    // Like the capsule, the reminder is left visible in screen sharing.
+    let meetingReminderPanelStaysInScreenSharingPassed = panel.sharingType == .readOnly && keyPanel.sharingType == .readOnly
+    // The meeting capsule and the status menu. The capsule shows only while a meeting is open and Within isn't the active
+    // app; its actions and the status menu's ask the controller once each, and a Resume that needs the acknowledgment
+    // shows the meeting's instead. Nothing is put on screen, no status item is made and nothing starts.
+    let indicatorStartsBefore = [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts]
+    /// Runs the main run loop until `condition` holds, for up to two seconds.
+    func runsUntil(_ condition: () -> Bool) -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while !condition(), Date() < deadline { RunLoop.main.run(until: Date().addingTimeInterval(0.01)) }
+        return condition()
+    }
+    let capsuleStates = ["meeting-capsule-recording", "meeting-capsule-first-minute", "meeting-capsule-paused", "meeting-capsule-after-unlock",
+                         "meeting-capsule-not-hearing", "meeting-capsule-source-lost", "meeting-capsule-dictation-refused", "meeting-capsule-dictation-refused-paused"]
+    let openMeetingStates = capsuleStates + ["home-meeting-recording", "home-meeting-paused", "home-meeting-finishing", "home-meeting-between-stretches",
+                                             "meeting-recording", "meeting-paused", "meeting-resume-acknowledge", "meeting-reminder-while-paused"]
+    let closedMeetingStates = ["ready", "recording", "practice-recording", "note-recording", "recovery", "meeting-finished", "meetings-library",
+                               "meeting-setup", "meeting-reminder", "settings-meetings"]
+    let meetingPillNeverShownPassed = AppDelegate.showsPill(fixture("recording")) && AppDelegate.showsPill(fixture("practice-recording"))
+        && !AppDelegate.showsPill(fixture("note-recording")) && !AppDelegate.showsPill(fixture("ready"))
+        && openMeetingStates.allSatisfy { let model = fixture($0); return model.activeCapture == .meeting && !AppDelegate.showsPill(model) }
+    let meetingCapsuleShownPassed = openMeetingStates.allSatisfy { let model = fixture($0); return model.meetingCapsuleShown(appIsActive: false) && !model.meetingCapsuleShown(appIsActive: true) }
+        && closedMeetingStates.allSatisfy { let model = fixture($0); return !model.meetingCapsuleShown(appIsActive: false) && model.meetingCapsuleContent == nil }
+    // What the capsule says in each state: its time spelled out, the sources and mute line in the first minute, why
+    // Within paused, and a refused dictation; a call's end is never described.
+    func capsule(_ state: String) -> MeetingCapsuleContent? { fixture(state).meetingCapsuleContent }
+    let zoomSources = "Transcribing: your microphone + Zoom’s sound"
+    let capsuleRecording = capsule("meeting-capsule-recording"), capsuleFirstMinute = capsule("meeting-capsule-first-minute")
+    let capsulePaused = capsule("meeting-capsule-paused"), capsuleUnlocked = capsule("meeting-capsule-after-unlock")
+    let capsuleQuiet = capsule("meeting-capsule-not-hearing"), capsuleLost = capsule("meeting-capsule-source-lost")
+    let capsuleRefused = capsule("meeting-capsule-dictation-refused"), capsuleRefusedPaused = capsule("meeting-capsule-dictation-refused-paused")
+    let capsuleCallEnded = capsule("meeting-call-ended")
+    let microphoneOnlyCapsule = fixture("meeting-capsule-first-minute")
+    microphoneOnlyCapsule.meetings.configurePreview(MeetingPreviews.microphoneOnly, phase: .recording, sourceStates: [.you: .live], elapsed: 12)
+    let refusedByShortcut = fixture("meeting-capsule-paused")
+    refusedByShortcut.shortcutPressed()
+    let reminderLines = fixture("meeting-reminder").meetingReminderContent
+    let meetingCapsuleWordsPassed = capsuleRecording?.title == "Meeting · 1:12:04" && capsuleRecording?.spokenTitle == "Meeting notes are on, \(MeetingTime.spoken(4324))"
+        && capsuleRecording?.action == .pause && capsuleRecording?.expansion == nil && capsuleRecording?.lines == [] && capsuleRecording?.symbol == "mic.fill"
+        && capsuleRecording?.warning == false && capsuleRecording?.finishTitle == nil && capsuleRecording?.resumeBlocker == nil
+        && capsuleFirstMinute?.title == "Meeting · 0:42" && capsuleFirstMinute?.expansion == .firstMinute && capsuleFirstMinute?.lines == [zoomSources, MeetingWords.muteHint]
+        && microphoneOnlyCapsule.meetingCapsuleContent?.lines == ["Transcribing: your microphone only", MeetingWords.muteHint]
+        && capsulePaused?.title == "Meeting paused" && capsulePaused?.spokenTitle == "Meeting notes are paused at \(MeetingTime.spoken(754))"
+        && capsulePaused?.action == .resume && capsulePaused?.resumeTitle == "Resume" && capsulePaused?.expansion == nil && capsulePaused?.finishTitle == nil
+        && capsulePaused?.symbol == "pause.circle"
+        && capsuleUnlocked?.expansion == .paused("Paused: the Mac locked or slept.") && capsuleUnlocked?.resumeTitle == "Resume…" && capsuleUnlocked?.finishTitle == "Finish"
+        && capsuleQuiet?.title == "Meeting · not hearing Zoom" && capsuleQuiet?.warning == true && capsuleQuiet?.symbol == "speaker.slash" && capsuleQuiet?.action == .pause
+        && capsuleLost?.expansion == .paused("Paused: Zoom’s sound or the output device changed.") && capsuleLost?.resumeTitle == "Resume…"
+        && capsuleRefused?.expansion == .dictationRefused && capsuleRefused?.lines == [MeetingCapsuleContent.dictationOff] && capsuleRefused?.finishTitle == nil
+        && capsuleRefused?.action == .pause
+        && capsuleRefusedPaused?.expansion == .dictationRefused && capsuleRefusedPaused?.finishTitle == "Finish meeting" && capsuleRefusedPaused?.action == .resume
+        && refusedByShortcut.meetingCapsuleContent?.expansion == .dictationRefused && refusedByShortcut.meetingCapsuleContent?.finishTitle == "Finish meeting"
+        && refusedByShortcut.message == AppModel.meetingDictationRefusal && refusedByShortcut.meetings.previewRequests.isEmpty
+        && capsuleCallEnded?.title == "Meeting paused" && capsuleCallEnded?.expansion == nil && capsuleCallEnded?.finishTitle == nil
+        && !((capsuleCallEnded?.lines ?? []) + [capsuleCallEnded?.title ?? "", capsuleCallEnded?.spokenTitle ?? ""]).contains { $0.localizedCaseInsensitiveContains("call") }
+        && reminderLines?.sources == "Will transcribe: your microphone + Zoom’s sound" && MeetingReminderContent.storage.contains(MeetingWords.muteHint)
+    // The capsule's actions, each asking the controller once. Only Show brings Within forward.
+    var windowsShown = 0
+    func counted(_ state: String) -> AppModel {
+        let model = fixture(state)
+        model.showMeetings = { windowsShown += 1 }; model.showWindow = { windowsShown += 1 }; model.showMain = { windowsShown += 1 }
+        return model
+    }
+    let capsulePausing = counted("meeting-capsule-recording"); capsulePausing.pauseOpenMeeting()
+    let capsuleResuming = counted("meeting-capsule-paused"); capsuleResuming.resumeOpenMeeting()
+    let capsuleFinishing = counted("meeting-capsule-after-unlock")
+    let capsuleFinish = capsuleFinishing.finishOpenMeeting()
+    let capsuleFinished = finished { await capsuleFinish.value } == true
+    let capsuleShowing = counted("meeting-capsule-recording"); capsuleShowing.showOpenMeeting()
+    let capsuleActionsPassed = capsulePausing.meetings.previewRequests == [.pause] && capsuleResuming.meetings.previewRequests == [.resume(acknowledged: false, microphoneOnly: false)]
+        && capsuleFinished && capsuleFinishing.meetings.previewRequests == [.finish] && capsuleShowing.meetings.previewRequests.isEmpty && windowsShown == 1
+    // Resume never resumes past a needed acknowledgment: after a lock, a lost source or a long pause it shows the
+    // meeting's checkbox in Within instead.
+    var acknowledgmentShown = true
+    for state in ["meeting-capsule-after-unlock", "meeting-capsule-source-lost", "meeting-resume-acknowledge"] {
+        let model = counted(state), before = windowsShown
+        model.resumeOpenMeeting()
+        acknowledgmentShown = acknowledgmentShown && model.meetings.needsAcknowledgment && model.meetings.previewRequests.isEmpty
+            && windowsShown == before + 1 && model.meetingsFocusRequest == .acknowledgment && model.meetings.phase == .paused
+    }
+    // The status menu, built for each state without a status item and refreshed as it is when it opens.
+    var statusDelegates: [AppDelegate] = []
+    func statusMenu(_ model: AppModel) -> NSMenu {
+        let delegate = AppDelegate()
+        statusDelegates.append(delegate)
+        return delegate.makeStatusMenu(for: model)
+    }
+    func titles(_ menu: NSMenu) -> [String] { menu.items.map { $0.isSeparatorItem ? "-" : $0.title } }
+    func visibleTitles(_ menu: NSMenu) -> [String] { menu.items.filter { !$0.isHidden }.map { $0.isSeparatorItem ? "-" : $0.title } }
+    func shownItem(_ menu: NSMenu, _ title: String) -> NSMenuItem? { menu.items.first { !$0.isHidden && $0.title == title } }
+    /// Chooses a shown, enabled item, as a click or Return would.
+    func choose(_ menu: NSMenu, _ title: String) -> Bool {
+        guard let index = menu.items.firstIndex(where: { !$0.isHidden && $0.isEnabled && $0.title == title }) else { return false }
+        menu.performActionForItem(at: index)
+        return true
+    }
+    let menuHead = "Within, by Made Ordinary", menuTail = ["-", "Open Within…", "Settings…", "Within Help", "-", "Quit Within"]
+    let dictationMenu = [menuHead, "Start Dictation", "Cancel Dictation", "Review Pending Words…", "Show Original Transcription…"] + menuTail
+    let meetingActions = ["Finish Meeting", "Discard Meeting…", "Show Meeting"]
+    let recordingStatus = counted("meeting-capsule-recording"), recordingMenu = statusMenu(recordingStatus)
+    let recordingTitleItem = shownItem(recordingMenu, "Meeting · 1:12:04")
+    let recordingMenuPassed = visibleTitles(recordingMenu) == [menuHead, "Meeting · 1:12:04", MeetingWords.muteHint, "Pause Meeting"] + meetingActions + menuTail
+        && recordingTitleItem?.isEnabled == false && recordingTitleItem?.accessibilityLabel() == "Meeting notes are on, \(MeetingTime.spoken(4324))"
+        && shownItem(recordingMenu, MeetingWords.muteHint)?.isEnabled == false
+        && (["Pause Meeting"] + meetingActions).allSatisfy { shownItem(recordingMenu, $0)?.isEnabled == true } && recordingMenu.delegate != nil
+    let shownBefore = windowsShown
+    let recordingMenuActs = choose(recordingMenu, "Pause Meeting") && choose(recordingMenu, "Show Meeting")
+        && recordingStatus.meetings.previewRequests == [.pause] && windowsShown == shownBefore + 1
+    let finishingStatus = counted("meeting-capsule-recording"), finishingMenu = statusMenu(finishingStatus)
+    let menuFinished = choose(finishingMenu, "Finish Meeting") && runsUntil { finishingStatus.meetings.previewRequests == [.finish] }
+    let pausedStatus = counted("meeting-capsule-paused"), pausedMenu = statusMenu(pausedStatus)
+    let pausedMenuPassed = visibleTitles(pausedMenu) == [menuHead, "Meeting · 12:34", "Meeting notes are paused", "Resume Meeting"] + meetingActions + menuTail
+        && shownItem(pausedMenu, "Meeting · 12:34")?.accessibilityLabel() == "Meeting notes are paused at \(MeetingTime.spoken(754))"
+        && choose(pausedMenu, "Resume Meeting") && pausedStatus.meetings.previewRequests == [.resume(acknowledged: false, microphoneOnly: false)]
+    let acknowledgingStatus = counted("meeting-capsule-after-unlock"), acknowledgingMenu = statusMenu(acknowledgingStatus)
+    let shownBeforeAcknowledging = windowsShown
+    let acknowledgingMenuPassed = visibleTitles(acknowledgingMenu) == [menuHead, "Meeting · 12:34", "Paused: the Mac locked or slept.", "Resume Meeting…"] + meetingActions + menuTail
+        && choose(acknowledgingMenu, "Resume Meeting…") && acknowledgingStatus.meetings.previewRequests.isEmpty
+        && windowsShown == shownBeforeAcknowledging + 1 && acknowledgingStatus.meetingsFocusRequest == .acknowledgment
+    // While a reminder shows, its three actions are here too; Start Zoom Notes… only opens the sheet over Within.
+    let reminderItems = ["Start Zoom Notes…", "Snooze Reminders for 1 Hour", "Dismiss Reminder"]
+    let reminderStatus = counted("meeting-reminder"), reminderMenu = statusMenu(reminderStatus)
+    let shownBeforeSheet = windowsShown
+    let reminderMenuPassed = visibleTitles(reminderMenu) == [menuHead] + reminderItems + ["-", "Start Dictation", "Cancel Dictation"] + menuTail
+        && choose(reminderMenu, "Start Zoom Notes…") && reminderStatus.meetingStartSheet && windowsShown == shownBeforeSheet + 1
+        && reminderStatus.meetingReminder != nil && reminderStatus.meetings.previewRequests.isEmpty
+    let snoozeStatus = counted("meeting-reminder"), snoozeMenu = statusMenu(snoozeStatus)
+    let snoozedFromMenu = choose(snoozeMenu, "Snooze Reminders for 1 Hour") && snoozeStatus.meetingReminder == nil
+    snoozeMenu.delegate?.menuWillOpen?(snoozeMenu)
+    let dismissStatus = counted("meeting-reminder"), dismissMenu = statusMenu(dismissStatus)
+    let reminderActionsPassed = snoozedFromMenu && visibleTitles(snoozeMenu) == [menuHead, "Start Dictation", "Cancel Dictation"] + menuTail
+        && choose(dismissMenu, "Dismiss Reminder") && dismissStatus.meetingReminder == nil
+        && snoozeStatus.meetings.previewRequests.isEmpty && dismissStatus.meetings.previewRequests.isEmpty
+    let bothMenu = statusMenu(fixture("meeting-reminder-while-paused"))
+    let bothPassed = visibleTitles(bothMenu) == [menuHead, "Meeting · 12:34", "Meeting notes are paused", "Resume Meeting"] + meetingActions + ["-"] + reminderItems + menuTail
+    // After Within closed unexpectedly during a meeting: a line and Show Meetings until it is opened.
+    let recoveredStatus = counted("meetings-library"), recoveredMenu = statusMenu(recoveredStatus)
+    let shownBeforeRecovered = windowsShown
+    let recoveredMenuPassed = visibleTitles(recoveredMenu) == [menuHead, "Meeting notes were interrupted", "Show Meetings", "-", "Start Dictation", "Cancel Dictation"] + menuTail
+        && shownItem(recoveredMenu, "Meeting notes were interrupted")?.isEnabled == false
+        && choose(recoveredMenu, "Show Meetings") && windowsShown == shownBeforeRecovered + 1
+    // While Resume is unavailable, the capsule and the status menu say why in words, not only with a dimmed button.
+    let blockedResume = counted("meeting-capsule-resume-blocked"), blockedMenu = statusMenu(blockedResume)
+    let blockedContent = blockedResume.meetingCapsuleContent
+    let unplugged = "Your selected microphone is unavailable."
+    let meetingCapsuleSaysWhyResumeIsUnavailablePassed = blockedContent?.resumeBlocker == unplugged && blockedContent?.lines == [unplugged]
+        && blockedContent?.action == .resume && blockedContent?.finishTitle == nil
+        && visibleTitles(blockedMenu) == [menuHead, "Meeting · 12:34", unplugged, "Resume Meeting"] + meetingActions + menuTail
+        && shownItem(blockedMenu, "Resume Meeting")?.isEnabled == false && !choose(blockedMenu, "Resume Meeting")
+        && blockedResume.meetings.previewRequests.isEmpty && capsulePaused?.lines == [] && capsulePaused?.resumeBlocker == nil
+    let meetingStatusMenuPassed = recordingMenuPassed && recordingMenuActs && menuFinished && pausedMenuPassed && acknowledgingMenuPassed && reminderMenuPassed
+        && reminderActionsPassed && bothPassed && recoveredMenuPassed
+    // The status item's symbol and the sentence VoiceOver reads change with the meeting; without one they are as before.
+    typealias Look = AppDelegate.StatusAppearance
+    let meetingStatusItemPassed = AppDelegate.statusAppearance(fixture("meeting-capsule-recording")) == Look(symbol: "mic.fill", description: "Within. Meeting notes on.", toolTip: "Within · meeting notes on")
+        && AppDelegate.statusAppearance(fixture("meeting-capsule-not-hearing")) == Look(symbol: "mic.fill", description: "Within. Meeting notes on, not hearing Zoom.", toolTip: "Within · not hearing Zoom")
+        && AppDelegate.statusAppearance(fixture("meeting-capsule-paused")) == Look(symbol: "mic.slash", description: "Within. Meeting notes paused. Microphone off.", toolTip: "Within · meeting notes paused")
+        && AppDelegate.statusAppearance(fixture("home-meeting-finishing")) == Look(symbol: "mic.slash", description: "Within. Finishing meeting notes.", toolTip: "Within · finishing meeting notes")
+        && AppDelegate.statusAppearance(fixture("home-meeting-between-stretches")) == Look(symbol: "mic.slash", description: "Within. Meeting notes starting.", toolTip: "Within · meeting notes starting")
+        && AppDelegate.statusAppearance(fixture("ready")) == Look(symbol: "waveform", description: "Within. Microphone off.", toolTip: "Within · microphone off")
+        && AppDelegate.statusAppearance(fixture("recording")) == Look(symbol: "mic.fill", description: "Within. Microphone on.", toolTip: "Within · recording")
+        && ["mic.fill", "mic.slash", "waveform", "pause.circle", "speaker.slash"].allSatisfy { NSImage(systemSymbolName: $0, accessibilityDescription: nil) != nil }
+    // With the developer default off: the status menu is dictation's alone, with no delegate, and no capsule or watcher.
+    var meetingsDefaultOffIndicatorsPassed = true
+    for state in ["ready", "recording", "note-recording", "recovery", "inserted-dictionary", "settings-privacy-saved-meetings"] {
+        let model = fixture(state), menu = statusMenu(model)
+        meetingsDefaultOffIndicatorsPassed = meetingsDefaultOffIndicatorsPassed && !model.showsMeetingsSpace
+            && titles(menu).dropFirst(2) == dictationMenu.dropFirst(2) && ["Start Dictation", "Stop and Transcribe", "Stop Note Recording"].contains(titles(menu)[1])
+            && menu.delegate == nil
+            && model.meetingCapsuleContent == nil && !model.meetingCapsuleShown(appIsActive: false) && model.meetingMenuLines == nil
+            && !model.meetingWatcher.isOn && !model.meetingWatcher.isPolling && !AppDelegate.showsPill(model) == (model.activeCapture != .dictation)
+    }
+    // The capsule's window: the pill's non-key panel on every space, never hidden from screen sharing, never shown here.
+    let capsulePanel = RecordingPanel.meetingCapsule(content: NSView())
+    let meetingCapsulePanelPassed = !capsulePanel.canBecomeKey && !capsulePanel.canBecomeMain && capsulePanel.styleMask.contains(.nonactivatingPanel)
+        && !capsulePanel.styleMask.contains(.titled) && capsulePanel.level == .floating && capsulePanel.collectionBehavior.contains(.canJoinAllSpaces)
+        && capsulePanel.collectionBehavior.contains(.fullScreenAuxiliary) && !capsulePanel.hidesOnDeactivate && capsulePanel.sharingType == .readOnly
+        && !capsulePanel.isVisible && !capsulePanel.isKeyWindow && capsulePanel.animationBehavior == .none
+        && capsulePanel.title == MeetingCapsuleContent.accessibilityName
+    let meetingResumeNeverBypassesAcknowledgmentPassed = acknowledgmentShown && acknowledgingMenuPassed
+    let meetingCapsuleAndMenuAskOncePassed = capsuleActionsPassed && recordingMenuActs && menuFinished && pausedMenuPassed && reminderMenuPassed && reminderActionsPassed
+        && [MeetingSourceAudit.microphoneStarts, MeetingSourceAudit.appAudioStarts] == indicatorStartsBefore
     // What VoiceOver gets from the meeting screen: each turn, live row, chip and Fixed tag is static text whose value
     // carries its words, state or count; the title stays a text field; the Zoom switch has a name. Checked last, as it
     // turns on the accessibility tree for this process.
     let meetingTranscriptExposesWordsToVoiceOverPassed = meetingAccessibilityPassed(fixture)
+    let meetingReminderIsOneLabelledGroupPassed = reminderAccessibilityPassed(fixture)
+    let meetingCapsuleIsOneLabelledGroupPassed = capsuleAccessibilityPassed(fixture)
+    let meetingIndicatorsPassed = meetingPillNeverShownPassed && meetingCapsuleShownPassed && meetingCapsuleWordsPassed && meetingCapsuleAndMenuAskOncePassed
+        && meetingResumeNeverBypassesAcknowledgmentPassed && meetingStatusMenuPassed && meetingStatusItemPassed && meetingsDefaultOffIndicatorsPassed
+        && meetingCapsulePanelPassed && meetingCapsuleIsOneLabelledGroupPassed && meetingCapsuleSaysWhyResumeIsUnavailablePassed
     let meetingFollowupsPassed = meetingSwitchSavesPendingEditFirstPassed && meetingAcknowledgmentClearedByBoundaryPassed && meetingContinueKeepsMicrophoneOnlyPassed
         && meetingHeldMeetingBlocksSetupWithReasonPassed && meetingBackupWordingFollowsChoicePassed && meetingTranscriptExposesWordsToVoiceOverPassed
+    let meetingRemindersPassed = meetingRemindersReadOnlyWhileOnPassed && meetingReminderOffersFromSyntheticReadingsPassed
+        && meetingReminderOfferStartsNothingPassed && meetingReminderStartNotesAcknowledgesOncePassed && meetingMenuPathNeverIncludesNeverEnabledSoundPassed
+        && meetingReminderHidesOnLockCaptureAndOffPassed && meetingReminderPanelNeverTakesFocusPassed && meetingReminderIsOneLabelledGroupPassed
+        && meetingReminderNotBackfilledAcrossLockPassed && meetingReminderStartCancelledByBoundaryOrQuitPassed && meetingReminderStartFailureComesForwardPassed
+        && meetingReminderClickGivesKeyboardFocusPassed && meetingReminderPanelStaysInScreenSharingPassed
+    // Every check above, from the first: the audio process list was never read.
+    let meetingChecksReadNoAudioProcessListPassed = readsBeforeReminders == 0 && MeetingSourceAudit.audioClientReads == 0
     let previewPreferencesUnchanged = preferenceKeys.map { UserDefaults.standard.object(forKey: $0) as? NSObject } == preferencesBefore
     let transitionsPassed = invalidationPassed && practiceLifecyclePassed && practiceCloseRecheckPassed && busyFeedbackPassed && busyFeedbackCleared && routingPassed && setupPassed && escapeScopePassed && shortcutEditingPassed && microphoneSelectionPassed && modifierSidePassed && recorderEventsPassed && sheetRoutingPassed && navigationPassed && practiceNavigationPassed && recoveryNavigationPassed
     let board = NSPasteboard(name: .init("Within.Fixture.\(UUID().uuidString)"))
@@ -1177,6 +1638,31 @@ func nativeChecks(to output: URL) throws {
         "meetingHeldMeetingBlocksSetupWithReasonPassed": meetingHeldMeetingBlocksSetupWithReasonPassed,
         "meetingBackupWordingFollowsChoicePassed": meetingBackupWordingFollowsChoicePassed,
         "meetingTranscriptExposesWordsToVoiceOverPassed": meetingTranscriptExposesWordsToVoiceOverPassed,
+        "meetingRemindersReadOnlyWhileOnWithSpaceVisiblePassed": meetingRemindersReadOnlyWhileOnPassed,
+        "meetingReminderOffersFromSyntheticReadingsPassed": meetingReminderOffersFromSyntheticReadingsPassed,
+        "meetingReminderOfferStartsNothingPassed": meetingReminderOfferStartsNothingPassed,
+        "meetingReminderStartNotesAcknowledgesOncePassed": meetingReminderStartNotesAcknowledgesOncePassed,
+        "meetingMenuPathNeverIncludesNeverEnabledSoundPassed": meetingMenuPathNeverIncludesNeverEnabledSoundPassed,
+        "meetingReminderHidesOnLockCaptureAndOffPassed": meetingReminderHidesOnLockCaptureAndOffPassed,
+        "meetingReminderPanelNeverTakesFocusPassed": meetingReminderPanelNeverTakesFocusPassed,
+        "meetingReminderIsOneLabelledGroupPassed": meetingReminderIsOneLabelledGroupPassed,
+        "meetingChecksReadNoAudioProcessListPassed": meetingChecksReadNoAudioProcessListPassed,
+        "meetingPillNeverShownForMeetingPassed": meetingPillNeverShownPassed,
+        "meetingCapsuleShownOnlyWhileOpenAndInactivePassed": meetingCapsuleShownPassed,
+        "meetingCapsuleCarriesStateSourcesAndMuteLinePassed": meetingCapsuleWordsPassed,
+        "meetingCapsuleAndMenuAskControllerOncePassed": meetingCapsuleAndMenuAskOncePassed,
+        "meetingResumeNeverBypassesAcknowledgmentPassed": meetingResumeNeverBypassesAcknowledgmentPassed,
+        "meetingStatusMenuFollowsStatePassed": meetingStatusMenuPassed,
+        "meetingStatusItemDescribesMeetingPassed": meetingStatusItemPassed,
+        "meetingsDefaultOffHasNoCapsuleMenuOrWatcherPassed": meetingsDefaultOffIndicatorsPassed,
+        "meetingCapsulePanelNeverTakesFocusAndStaysInScreenSharingPassed": meetingCapsulePanelPassed,
+        "meetingCapsuleIsOneLabelledGroupPassed": meetingCapsuleIsOneLabelledGroupPassed,
+        "meetingReminderNotBackfilledAcrossLockPassed": meetingReminderNotBackfilledAcrossLockPassed,
+        "meetingReminderStartCancelledByBoundaryOrQuitPassed": meetingReminderStartCancelledByBoundaryOrQuitPassed,
+        "meetingReminderStartFailureComesForwardPassed": meetingReminderStartFailureComesForwardPassed,
+        "meetingReminderClickGivesKeyboardFocusPassed": meetingReminderClickGivesKeyboardFocusPassed,
+        "meetingReminderPanelStaysInScreenSharingPassed": meetingReminderPanelStaysInScreenSharingPassed,
+        "meetingCapsuleSaysWhyResumeIsUnavailablePassed": meetingCapsuleSaysWhyResumeIsUnavailablePassed,
         "dictionaryStoreOwnerOnlyAtomicKeptInBackupsPassed": dictionaryStorePassed,
         "dictionaryProtectedFileIsNeverOverwrittenPassed": dictionaryProtectedPassed,
         "dictionaryPreviewWritesNothingPassed": dictionaryPreviewPassed,
@@ -1186,7 +1672,7 @@ func nativeChecks(to output: URL) throws {
         "emptyDictionaryLeavesDictationUnchangedPassed": emptyDictionaryLeavesDictationUnchangedPassed,
         "dictionaryUnreadableLineShownPassed": dictionaryUnreadableLineShownPassed,
         "updatePreviewWithoutNetworkPassed": updatesPassed,
-        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
+        "allPassed": roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && meetingRemindersPassed && meetingChecksReadNoAudioProcessListPassed && meetingIndicatorsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed,
         "notTested": ["live note recording with a microphone", "note lock/sleep pause on a real Mac", "live history recording after real insertion", "physical custom shortcut events", "global paste shortcut", "live app insertion", "clipboard managers", "Universal Clipboard", "VoiceOver", "modal keyboard events", "login launch", "live dictation with dictionary entries in real apps", "dictionary editor, recovery switch, Dictation row, Practice and Notes controls with VoiceOver", "Time Machine inclusion on a real backup", "Spotlight exclusion of the Dictionary.noindex folder", "Time Machine exclusion and Spotlight exclusion of the Meetings.noindex folder", "Open dictionary navigation from the Dictation space in the running app"],
         "meetingsNotTested": ["a meeting started, paused, resumed, finished, continued or discarded from the Meetings space in the running app",
             "keyboard-only and VoiceOver passes over the library, setup and meeting screen, including rotors, Read latest and the Fixed tag's action",
@@ -1203,9 +1689,26 @@ func nativeChecks(to output: URL) throws {
             "Show in Finder and Delete all in the running app", "System Audio Recording prompt and its System Settings pane",
             "Stop and Cancel leaving a live meeting's rings open", "the quit reason of a real logout, restart or shutdown",
             "a logout canceled after Within finished a meeting", "a second quit from the Dock or another app while Finish and Quit saves",
-            "the Quit items while Finish and Quit saves", "the unlock announcement after a lock during a rollover"]]
+            "the Quit items while Finish and Quit saves", "the unlock announcement after a lock during a rollover",
+            "a reminder for a real Zoom call, and its withdrawal when the call stops using the microphone",
+            "the 2-second reading of which apps use a microphone in the running app, its cost, and App Nap with Within in the background",
+            "the reminder panel on screen: its place under the menu bar, all spaces and full screen, and Zoom keeping focus when it appears",
+            "the reminder panel and the menu-path sheet with the keyboard and VoiceOver, and whether its announcement is spoken while Zoom is frontmost",
+            "Start notes, Snooze and Dismiss on a real reminder, a snooze lasting an hour, and reminders after a relaunch",
+            "a start from the reminder that fails after the panel closed, bringing Within forward on New meeting",
+            "lock, sleep or a user switch hiding a real reminder, and a new call after unlock still getting one",
+            "the unlock, wake and session notifications that end a lock's hold on reminders",
+            "a click into the reminder making it key without activating Within, its buttons by keyboard with Full Keyboard Access, and keyboard focus back in Zoom when it closes",
+            "a lock or quit while Start notes finishes a paused meeting's save",
+            "a display connected, disconnected or rescaled during a meeting or while a reminder shows",
+            "the menu-path sheet refused while another dialog is open in Within",
+            "the meeting capsule on screen: its place under the menu bar and above a reminder, all spaces and full screen, screen sharing, and showing only while another app is in front",
+            "the capsule's Pause, Resume, Finish and Show with the pointer while Zoom keeps focus, and its first minute ending after 60 seconds",
+            "the capsule's dictation refusal lasting about 4 seconds after a real shortcut press",
+            "the status menu during a meeting and while a reminder shows, with Control-F8 and VoiceOver, including the spelled-out time and the changing status item description",
+            "Discard Meeting… from the status menu while another app is in front"]]
     try writeReport(report, to: output)
-    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
+    guard roundtrip && userCopyPreserved && oversizeRefused && readinessPassed && previewPreferencesUnchanged && transitionsPassed && historyStorePassed && historyPolicyPassed && notesStorePassed && notesGuardsPassed && meetingsStorePassed && meetingPreviewPassed && meetingRefusesCapturePassed && meetingStartRefusalsPassed && meetingWordsHonest && meetingUnloadPassed && meetingsDefaultOffPassed && meetingUpkeepPassed && meetingsBackupChoicePassed && meetingsSpacePassed && meetingSettingsHiddenPassed && meetingMenuStatesPassed && meetingBackupsSwitchPassed && meetingBackupLaunchPassed && meetingRetentionChoicePassed && meetingFollowupsPassed && meetingRemindersPassed && meetingChecksReadNoAudioProcessListPassed && meetingIndicatorsPassed && dictionaryStorePassed && dictionaryProtectedPassed && dictionaryPreviewPassed && dictionaryRecoverySwitchPassed && dictionaryCopyOriginalPassed && dictionaryPracticeRestorePassed && emptyDictionaryLeavesDictationUnchangedPassed && dictionaryUnreadableLineShownPassed && updatesPassed else { throw CompatibilityPaste.Failure.writeFailed }
 }
 
 /// One element of the accessibility tree as VoiceOver receives it.
@@ -1214,29 +1717,45 @@ private struct AccessibilityNode {
     let actions: [String]
 }
 
+/// As an assistive app asks for the tree; the legacy setter is reached by name. Process-local; it prompts for nothing.
+@MainActor
+private func assistive(_ on: Bool) {
+    for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
+        _ = NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on), with: attribute as NSString)
+    }
+}
+
+@MainActor
+private func walk(_ node: Any, _ depth: Int, _ out: inout [AccessibilityNode]) {
+    guard depth < 40, let element = node as? NSObject else { return }
+    func get(_ name: String) -> Any? {
+        let selector = NSSelectorFromString(name)
+        return element.responds(to: selector) ? element.perform(selector)?.takeUnretainedValue() : nil
+    }
+    out.append(AccessibilityNode(role: get("accessibilityRole") as? String ?? "", label: get("accessibilityLabel") as? String ?? "",
+                                 value: get("accessibilityValue").map { "\($0)" } ?? "",
+                                 actions: (get("accessibilityCustomActions") as? [NSAccessibilityCustomAction])?.map(\.name) ?? []))
+    for child in get("accessibilityChildren") as? [Any] ?? [] { walk(child, depth + 1, &out) }
+}
+
+/// A hosted view's tree once SwiftUI has filled it in, which takes a few passes after it is first asked for.
+@MainActor
+private func accessibilityNodes(_ host: NSView) -> [AccessibilityNode] {
+    var nodes: [AccessibilityNode] = []
+    for _ in 0..<5 {
+        RunLoop.main.run(until: Date().addingTimeInterval(0.3))
+        host.needsLayout = true; host.layoutSubtreeIfNeeded()
+        nodes = []; walk(host, 0, &nodes)
+    }
+    return nodes
+}
+
 /// The meeting screen's tree, built the way VoiceOver asks for it: the window is hosted with the accessibility tree
 /// turned on for this process, then walked. Synthetic preview meetings only; nothing is spoken, read or written.
 @MainActor
 private func meetingAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool {
-    // As an assistive app asks for it; the legacy setter is reached by name. Process-local; it prompts for nothing.
-    func assistive(_ on: Bool) {
-        for attribute in ["AXEnhancedUserInterface", "AXManualAccessibility"] {
-            _ = NSApp.perform(NSSelectorFromString("accessibilitySetValue:forAttribute:"), with: NSNumber(value: on), with: attribute as NSString)
-        }
-    }
     assistive(true)
     defer { assistive(false) }
-    func walk(_ node: Any, _ depth: Int, _ out: inout [AccessibilityNode]) {
-        guard depth < 40, let element = node as? NSObject else { return }
-        func get(_ name: String) -> Any? {
-            let selector = NSSelectorFromString(name)
-            return element.responds(to: selector) ? element.perform(selector)?.takeUnretainedValue() : nil
-        }
-        out.append(AccessibilityNode(role: get("accessibilityRole") as? String ?? "", label: get("accessibilityLabel") as? String ?? "",
-                                     value: get("accessibilityValue").map { "\($0)" } ?? "",
-                                     actions: (get("accessibilityCustomActions") as? [NSAccessibilityCustomAction])?.map(\.name) ?? []))
-        for child in get("accessibilityChildren") as? [Any] ?? [] { walk(child, depth + 1, &out) }
-    }
     func tree(_ state: String) -> [AccessibilityNode] {
         let model = fixture(state)
         let navigation = AppNavigation()
@@ -1246,14 +1765,7 @@ private func meetingAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool
         let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         window.contentView = host
         defer { window.contentView = nil; window.orderOut(nil) }
-        var nodes: [AccessibilityNode] = []
-        // SwiftUI fills the tree in over a few passes once it is asked for.
-        for _ in 0..<5 {
-            RunLoop.main.run(until: Date().addingTimeInterval(0.3))
-            host.needsLayout = true; host.layoutSubtreeIfNeeded()
-            nodes = []; walk(host, 0, &nodes)
-        }
-        return nodes
+        return accessibilityNodes(host)
     }
     func node(_ nodes: [AccessibilityNode], _ label: String) -> AccessibilityNode? { nodes.first { $0.label == label } }
     let staticText = NSAccessibility.Role.staticText.rawValue
@@ -1273,4 +1785,48 @@ private func meetingAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool
     let setup = tree("meeting-setup-computer-audio-intro")
     let setupPassed = setup.contains { $0.role == NSAccessibility.Role.checkBox.rawValue && $0.label == "Include Zoom’s sound (the other people)" }
     return fixesPassed && recordingPassed && setupPassed
+}
+
+/// The reminder as VoiceOver meets it: one group named "Within meeting reminder" holding its title, the acknowledgment and
+/// its three actions as buttons. Hosted in a borderless window that is never shown; nothing is started.
+@MainActor
+private func reminderAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool {
+    assistive(true)
+    defer { assistive(false) }
+    let model = fixture("meeting-reminder")
+    let host = NSHostingView(rootView: ReminderView(model: model, watcher: model.meetingWatcher, meetings: model.meetings))
+    host.frame = NSRect(origin: .zero, size: host.fittingSize)
+    let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = host
+    defer { window.contentView = nil; window.orderOut(nil) }
+    let nodes = accessibilityNodes(host)
+    let button = NSAccessibility.Role.button.rawValue
+    let group = nodes.firstIndex { $0.label == MeetingReminderContent.accessibilityName }
+    let inside = group.map { Array(nodes[($0 + 1)...]) } ?? []
+    return group != nil && ["Start notes", MeetingReminderContent.snooze, "Dismiss"].allSatisfy { title in inside.contains { $0.role == button && $0.label == title } }
+        && inside.contains { $0.label == MeetingReminderContent.acknowledgment || $0.value == MeetingReminderContent.acknowledgment }
+        && model.meetings.previewRequests.isEmpty
+}
+
+/// The capsule as VoiceOver meets it: one group named "Within meeting notes" with a Show meeting action, holding its
+/// time spelled out, the mute line and its Pause and Show buttons. Hosted in a borderless window that is never shown.
+@MainActor
+private func capsuleAccessibilityPassed(_ fixture: (String) -> AppModel) -> Bool {
+    assistive(true)
+    defer { assistive(false) }
+    let model = fixture("meeting-capsule-first-minute")
+    let host = NSHostingView(rootView: MeetingCapsuleView(model: model, meetings: model.meetings))
+    host.frame = NSRect(origin: .zero, size: host.fittingSize)
+    let window = NSWindow(contentRect: host.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+    window.contentView = host
+    defer { window.contentView = nil; window.orderOut(nil) }
+    let nodes = accessibilityNodes(host)
+    let button = NSAccessibility.Role.button.rawValue
+    guard let group = nodes.firstIndex(where: { $0.label == MeetingCapsuleContent.accessibilityName }) else { return false }
+    let inside = Array(nodes[(group + 1)...])
+    return nodes[group].actions.contains(MeetingCapsuleContent.showAction)
+        && ["Pause", "Show"].allSatisfy { title in inside.contains { $0.role == button && $0.label == title } }
+        && inside.contains { $0.label == "Meeting notes are on, \(MeetingTime.spoken(42))" || $0.value == "Meeting notes are on, \(MeetingTime.spoken(42))" }
+        && inside.contains { $0.label == MeetingWords.muteHint || $0.value == MeetingWords.muteHint }
+        && model.meetings.previewRequests.isEmpty
 }

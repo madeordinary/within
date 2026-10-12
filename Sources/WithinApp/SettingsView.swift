@@ -573,6 +573,9 @@ struct MeetingSettingsPage: View {
     /// A shorter retention that would delete saved meetings, waiting for the user's answer.
     private struct PendingRetention { let retention: DocumentRetention; let count: Int }
     static let help = "Open Meetings and choose New meeting. Nothing listens until you confirm that everyone in the meeting knows it’s being transcribed and choose Start meeting. Your microphone is labelled You and, if you include it, Zoom’s sound is labelled Others; labels are sources, not people. Pause, a lock or sleep stops listening, and nothing resumes on its own. Dictation and note recording wait until you finish. The transcript and your notes are saved on this Mac as you go; audio is never kept. Export saves a Markdown copy only where you choose."
+    static let reminders = "Zoom only for now. When a Zoom call starts using your microphone, Within shows a small reminder with Start notes. Nothing listens until you choose it. While this is on, Within checks every 2 seconds which apps are using a microphone; it reads no sound."
+    static let remindersKept = "Snooze lasts an hour, and Dismiss lasts until that call ends. Both end if Within quits."
+    static let remindersUnsupported = "Call reminders need macOS 14.2 or later; they haven’t been tested on earlier versions. You can still start meeting notes from the Meetings space."
     static let systemAudio = "Lets Within hear Zoom’s sound when you include it in a meeting. macOS doesn’t limit this permission to one app: it lets an app record sound from any app on this Mac. Within uses it only for Zoom, and only while meeting notes are on. macOS doesn’t tell Within whether it’s allowed; you can check it in System Settings under Privacy & Security."
     @ObservedObject var model: AppModel
     @State private var pending: PendingRetention?
@@ -586,6 +589,7 @@ struct MeetingSettingsPage: View {
                 Text("Saved on this Mac. Nothing listens until you choose Start meeting, and audio is never kept.")
                     .font(.system(size: 12)).foregroundStyle(Palette.secondary)
             }
+            MeetingReminderSetting(model: model)
             VStack(alignment: .leading, spacing: 14) {
                 Text("Keep meetings").font(.system(size: 13, weight: .medium))
                 MeetingRetentionPicker(selection: Binding(get: { model.meetingRetention }, set: request))
@@ -651,6 +655,33 @@ struct MeetingSettingsPage: View {
             guard !Task.isCancelled else { return }
             if count > 0 { pending = PendingRetention(retention: retention, count: count) } else { model.chooseMeetingRetention(retention) }
         }
+    }
+}
+
+/// "Offer to take notes when a call starts": off unless turned on, Zoom only, and offered only where macOS can tell which
+/// apps use a microphone. Turning it off hides any reminder at once.
+private struct MeetingReminderSetting: View {
+    @ObservedObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if model.meetingAppSoundSupported {
+                HStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Offer to take notes when a call starts").font(.system(size: 13, weight: .medium))
+                        Text(MeetingSettingsPage.reminders).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 12)
+                    Toggle("Offer to take notes when a call starts", isOn: Binding(get: { model.meetingReminders }, set: model.setMeetingReminders))
+                        .labelsHidden().toggleStyle(.switch)
+                }
+                if model.meetingReminders {
+                    Text(MeetingSettingsPage.remindersKept).font(.system(size: 11)).foregroundStyle(Palette.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Label(MeetingSettingsPage.remindersUnsupported, systemImage: "info.circle").font(.system(size: 12)).foregroundStyle(Palette.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }.withinSurface(padding: 16)
     }
 }
 

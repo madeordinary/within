@@ -116,13 +116,35 @@ final class AppModel: ObservableObject {
     /// The shown meeting reads as originally transcribed instead of in your spellings; reset for each meeting.
     @Published private(set) var showingOriginalTranscription = false
     /// Include Zoom's sound in the next start; off at every launch, and remembered only for this run.
-    @Published var includeZoomSound = false
+    @Published var includeZoomSound = false { didSet { if includeZoomSound { zoomSoundEverIncluded = true } } }
     /// Why the last new meeting didn't start, shown in setup until it is left.
     @Published private(set) var meetingSetupFailure: String?
     /// Where focus goes next in the Meetings space; the view that can take it clears it.
     @Published var meetingsFocusRequest: MeetingsFocus?
     /// Including an app's sound needs macOS 14.2; a preview can say otherwise to show the microphone-only setup.
     @Published private(set) var meetingAppSoundSupported = AppModel.appSoundAvailable
+    /// The stored `meetingReminders`; unset is off. Written only by Settings → Meetings' switch.
+    @Published private(set) var meetingReminders: Bool
+    /// Opt-in reminders: the only reader of which apps use a microphone, and only while they are on and the space is
+    /// visible. A preview's has no reader. Views observe it directly.
+    private(set) var meetingWatcher = MeetingWatcher(read: nil)
+    private var meetingWatcherObserver: AnyCancellable?
+    /// Zoom's sound was turned on at least once in this run, in setup or by the reminder's first-time choice. In memory
+    /// only, like the switch: until then the reminder explains it first and starts with the microphone alone.
+    @Published private(set) var zoomSoundEverIncluded = false
+    /// The shown reminder's sources; its link changes this start only.
+    @Published private(set) var reminderIncludesZoomSound = false
+    /// The reminder's first-time explanation is showing, after Start notes.
+    @Published private(set) var reminderExplaining = false
+    /// The menu path's sheet over Within's window; it closes whenever its reminder does.
+    @Published private(set) var meetingStartSheet = false
+    /// The dictation shortcut was refused during a meeting a moment ago; the capsule says so for a few seconds.
+    @Published private(set) var meetingDictationRefused = false
+    private var dictationRefusalReset: Task<Void, Never>?
+    /// The acknowledgment epoch a start from the reminder began in, until that meeting closes.
+    private var reminderStartEpoch: Int?
+    /// Bumped by each quit that starts saving the meeting, so a start the reminder asked for before it never happens after.
+    private var meetingQuitRequests = 0
     /// Each saved turn in your spellings, kept while its text and the dictionary stay the same.
     let meetingSpellings = MeetingSpellingCache()
     /// Bumped whenever the matcher may have changed.
@@ -187,6 +209,9 @@ final class AppModel: ObservableObject {
     var showPractice: (() -> Void)?
     var practiceAreaIsActive: (() -> Bool)?
     var showRecovery: (() -> Void)?
+    var showMeetings: (() -> Void)?
+    /// Brings Within's window forward without changing its page.
+    var showWindow: (() -> Void)?
     var dismissRecovery: (() -> Void)?
 
     var phase: DictationPhase { session.phase }
@@ -217,6 +242,10 @@ final class AppModel: ObservableObject {
     static let meetingNoteRefusal = "Finish your meeting to record a note."
     static let meetingModelRefusal = "Finish your meeting before removing the model."
     static let meetingDownloadRefusal = "Finish your meeting before downloading the model."
+    static let dictationRefusalShown: Duration = .seconds(4)
+    /// As setup says when a start fails for no reason it can name.
+    static let meetingStartFailed = "Meeting notes couldn’t start. Try again."
+    static let meetingStartSheetBlocked = "Close the open dialog in Within, then choose Start Zoom Notes… again."
     /// A quit must wait for the meeting: it is open, a finished one still has something to write, or a quit is
     /// already saving it.
     var meetingNeedsSaveToQuit: Bool { activeCapture == .meeting || meetings.hasUnsavedWork || meetingQuit != nil }
@@ -255,7 +284,9 @@ final class AppModel: ObservableObject {
         meetingRetention = .restored(from: UserDefaults.standard.string(forKey: "meetingRetention"))
         meetingBackups = Self.storedMeetingBackups(UserDefaults.standard.object(forKey: "meetingBackups"))
         meetingBackupsWereIncluded = Self.meetingBackupsWereIncluded(UserDefaults.standard.object(forKey: "meetingBackups"))
+        meetingReminders = UserDefaults.standard.object(forKey: "meetingReminders") as? Bool ?? false
         observeMeetings()
+        observeMeetingWatcher()
         if preview { return }
         if dictionaryFixture { openDictionary(base); return }
         // Upkeep runs whatever the default says; only use of meetings waits for it.
@@ -272,6 +303,12 @@ final class AppModel: ObservableObject {
                 return sources
             }
             observeMeetings()
+            meetingWatcher = MeetingWatcher {
+                MeetingSourceAudit.audioClientReads += 1
+                return SystemOutput.audioClients()
+            }
+            observeMeetingWatcher()
+            updateMeetingWatcher()
         }
         updateTimer = Timer.scheduledTimer(withTimeInterval: 3600, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.runAutomaticUpdateCheckIfDue() }
@@ -503,6 +540,7 @@ final class AppModel: ObservableObject {
         }
         startupDiagnostics.mark(.targetCaptured)
         guard let id = session.begin() else { return }
+        meetingWatcher.captureStarted()
         isPracticeSession = practice
         stopDiagnostics.begin()
         capture.resetDiagnostics()
@@ -991,6 +1029,9 @@ final class AppModel: ObservableObject {
         guard !previewMode else { return }
         meetingObservers.append(meetings.$phase.map { _ in () }.merge(with: meetings.$notSaved.map { _ in () }, meetings.$meeting.map { $0?.id }.removeDuplicates().map { _ in () })
             .receive(on: DispatchQueue.main).sink { [weak self] in MainActor.assumeIsolated { self?.meetingStateChanged() } })
+        // The status item says when the meeting app goes quiet, which changes no phase.
+        meetingObservers.append(meetings.$sourceStates.map { $0[.others] }.removeDuplicates().dropFirst()
+            .receive(on: DispatchQueue.main).sink { [weak self] _ in MainActor.assumeIsolated { self?.stateChanged?() } })
     }
     private static let meetingCaptureErrors: Set<MeetingStretchEnd> = [.speechError, .processingFellBehind, .microphoneStalled, .computerAudioStalled]
     private func meetingStateChanged() {
@@ -1021,6 +1062,7 @@ final class AppModel: ObservableObject {
         if let end = meetings.lastEnd, end != meetingEndSeen, Self.meetingCaptureErrors.contains(end) { lastErrorCode = "meeting_capture_or_inference" }
         if meetings.notSaved, !meetingSaveFailedSeen { lastErrorCode = "meeting_save_failed" }
         meetingFailureSeen = meetings.startFailure; meetingEndSeen = meetings.lastEnd; meetingSaveFailedSeen = meetings.notSaved
+        reminderStartClosed(failure: meetingSetupFailure)
         notify()
     }
     // MARK: Meetings space
@@ -1310,6 +1352,7 @@ final class AppModel: ObservableObject {
     func finishMeetingForQuit() -> Task<Bool, Never> {
         if let meetingQuit { return meetingQuit }
         meetings.stopForQuit()
+        meetingQuitRequests += 1
         let quitting = Task { @MainActor [weak self] () -> Bool in
             guard let self else { return false }
             let saved = await meetings.quit()
@@ -1319,6 +1362,208 @@ final class AppModel: ObservableObject {
         meetingQuit = quitting
         return quitting
     }
+
+    // MARK: Meeting reminders
+
+    /// Which apps use a microphone is read only while reminders are on, the space is visible and macOS is 14.2 or later.
+    var meetingRemindersActive: Bool { showsMeetingsSpace && meetingReminders && meetingAppSoundSupported }
+    var meetingReminder: MeetingReminderState.Reminder? { meetingWatcher.shown }
+    /// No reminder is offered during any capture, a dictation's review or a shortcut change. A paused meeting is open but
+    /// not capturing, so a new call is still offered.
+    var meetingReminderBlocked: Bool {
+        meetings.isCapturing || isRecordingNote || [.preparing, .recording, .transcribing, .recovery].contains(phase) || editingShortcut
+    }
+    /// What the reminder and the menu-path sheet say now; nil without a reminder.
+    var meetingReminderContent: MeetingReminderContent? {
+        guard meetingReminder != nil else { return nil }
+        let firstTime = !zoomSoundEverIncluded
+        return MeetingReminderContent(blocker: meetingHeldMessage ?? meetingStartBlocker, paused: meetings.phase == .paused,
+                                      firstTime: firstTime, includesZoomSound: !firstTime && reminderIncludesZoomSound)
+    }
+    /// Settings → Meetings' switch, only while the space is visible. Off hides any reminder at once and stops reading.
+    func setMeetingReminders(_ on: Bool) {
+        guard showsMeetingsSpace, on != meetingReminders else { return }
+        meetingReminders = on
+        if !previewMode { UserDefaults.standard.set(on, forKey: "meetingReminders") }
+        updateMeetingWatcher()
+    }
+    private func updateMeetingWatcher() { meetingWatcher.update(on: meetingRemindersActive) }
+    private func observeMeetingWatcher() {
+        meetingWatcher.captureActive = { [weak self] in self?.meetingReminderBlocked ?? true }
+        meetingWatcher.pausedMeeting = { [weak self] in self?.meetings.phase == .paused }
+        meetingWatcher.onChange = { [weak self] in self?.meetingReminderChanged() }
+        meetingWatcherObserver = meetingWatcher.$shown.sink { [weak self] _ in self?.objectWillChange.send() }
+    }
+    /// Each reminder starts with the sources setup would use and is announced; the sheet closes with it.
+    private func meetingReminderChanged() {
+        reminderExplaining = false
+        if meetingReminder != nil {
+            reminderIncludesZoomSound = meetingApp != nil
+            announce("Within: \(MeetingReminderContent.title)")
+        } else { meetingStartSheet = false }
+        notify()
+    }
+    /// Start notes on the reminder. Until Zoom's sound was included in this run, it explains that first and starts
+    /// nothing; otherwise it starts with the sources shown. The task ends once the start was asked for or refused.
+    @discardableResult func reminderStartNotes() -> Task<Bool, Never>? {
+        guard let content = meetingReminderContent, content.blocker == nil else { return nil }
+        guard !content.firstTime else {
+            reminderExplaining = true
+            announce(MeetingReminderContent.explaining); notify()
+            return nil
+        }
+        return meetingStartSheetDefault()
+    }
+    /// The first-time choice. Including Zoom's sound turns setup's switch on for this run, as turning it on there does.
+    @discardableResult func reminderStart(includingZoomSound: Bool) -> Task<Bool, Never>? {
+        guard let content = meetingReminderContent, content.blocker == nil else { return nil }
+        if includingZoomSound && meetingAppSoundSupported { includeZoomSound = true }
+        let app = includingZoomSound ? meetingApp : nil
+        return Task { await startMeetingFromReminder(app) }
+    }
+    /// The sheet's default button, and Start notes once Zoom's sound was included: the sources shown, so never Zoom's
+    /// sound before it was ever turned on.
+    @discardableResult func meetingStartSheetDefault() -> Task<Bool, Never>? {
+        guard let content = meetingReminderContent, content.blocker == nil else { return nil }
+        let app: MeetingApp? = content.includesZoomSound ? .zoom : nil
+        return Task { await startMeetingFromReminder(app) }
+    }
+    /// Start notes: the click is the acknowledgment, passed once. A paused meeting is finished first; a lock, sleep, user
+    /// switch or quit while it saves cancels the start, since the click came before it. Within's window stays where it is,
+    /// so focus stays in the call, unless notes then can't start: it comes forward on New meeting, which says why.
+    @discardableResult func startMeetingFromReminder(_ app: MeetingApp?) async -> Bool {
+        guard showsMeetingsSpace else { return false }
+        // Refused while the reminder still shows, so it stays and says why.
+        if let refusal = meetingHeldMessage ?? meetingStartRefusal() { announce(refusal); notify(); return false }
+        let epoch = meetings.acknowledgmentEpoch, quits = meetingQuitRequests
+        let effects = meetingWatcher.handle(.startNotes)
+        guard effects.contains(where: { if case .startMeeting = $0 { return true }; return false }) else { return false }
+        if meetings.phase == .paused {
+            let finished = await finishMeeting()
+            guard meetings.acknowledgmentEpoch == epoch, meetingQuitRequests == quits, !quittingMeeting else { return false }
+            guard finished else { reminderStartFailed(nil); return false }
+        }
+        guard !meetings.isOpen else { return false }
+        keepShownMeetingInLibrary()
+        guard meetings.start(app: app, acknowledged: true) else {
+            // The controller says its own refusals.
+            reminderStartFailed(meetings.refusal == nil ? Self.meetingStartFailed : nil)
+            return false
+        }
+        meetingSetupFailure = nil; showingOriginalTranscription = false
+        meetingsRoute = .meeting; meetingsFocusRequest = .notes
+        reminderStartEpoch = epoch
+        return true
+    }
+    /// After the reminder closed, notes didn't start: Within comes forward on New meeting, which shows why, or on the
+    /// meeting still open.
+    private func reminderStartFailed(_ failure: String?, announcing: Bool = true) {
+        if !meetings.isOpen { meetingSetupFailure = failure; meetingsRoute = .setup }
+        if announcing, let failure { announce(failure) }
+        notify()
+        showMeetings?()
+    }
+    /// Once a meeting the reminder started has closed: if it never started, for a reason other than a lock, sleep, user
+    /// switch or quit, Within says so as for a refusal. Called as the meeting changes; native checks call it directly.
+    func reminderStartClosed(failure: String?) {
+        guard let epoch = reminderStartEpoch, !meetings.isOpen else { return }
+        reminderStartEpoch = nil
+        guard let failure, epoch == meetings.acknowledgmentEpoch, !quittingMeeting else { return }
+        // A save that failed was said already.
+        reminderStartFailed(failure, announcing: meetings.startFailure != nil)
+    }
+    func reminderSnooze() { meetingWatcher.handle(.snooze) }
+    func reminderDismiss() { meetingWatcher.handle(.dismiss) }
+    /// The sources line's link: this start only.
+    func toggleReminderZoomSound() {
+        guard meetingReminderContent?.firstTime == false else { return }
+        reminderIncludesZoomSound.toggle()
+        notify()
+    }
+    /// Opens the paused meeting, or what keeps notes from starting. The reminder stays until one of its own actions.
+    func reminderShowPausedMeeting() { showMeetings?() }
+    func reminderOpenWithin() { if meetingHeldMessage != nil { showMeetings?() } else { showMain?() } }
+    /// The menu path: Within comes forward with the reminder's full text in a sheet. Only the sheet's buttons start anything.
+    func openMeetingStartSheet() {
+        guard showsMeetingsSpace, meetingReminder != nil else { return }
+        meetingStartSheet = true
+        showWindow?()
+        notify()
+    }
+    func closeMeetingStartSheet() {
+        guard meetingStartSheet else { return }
+        meetingStartSheet = false
+        notify()
+    }
+    /// Another dialog already covers Within's window, so the sheet can't show: nothing starts, and it says why.
+    func meetingStartSheetUnavailable() {
+        guard meetingStartSheet else { return }
+        meetingStartSheet = false
+        announce(Self.meetingStartSheetBlocked); notify()
+    }
+
+    // MARK: Meeting capsule and status menu
+
+    /// The capsule shows while a meeting is open and Within isn't the active app.
+    func meetingCapsuleShown(appIsActive: Bool) -> Bool { !appIsActive && meetingCapsuleContent != nil }
+    /// What the capsule says now: nil unless a meeting is open. A pause is described from its stretch, never as a call's end.
+    var meetingCapsuleContent: MeetingCapsuleContent? {
+        guard showsMeetingsSpace, meetings.isOpen, let meeting = meetings.meeting else { return nil }
+        let phase = meetings.phase, elapsed = meetings.elapsed, app = meeting.appName
+        let notHearing = phase == .recording && [.quiet, .lost].contains(meetings.sourceStates[.others])
+        let sources = meetings.sourceStates[.others] != nil ? "Transcribing: your microphone + \(app)’s sound" : "Transcribing: your microphone only"
+        let (title, spoken): (String, String) = switch phase {
+        case .preparing: ("Meeting · starting…", "Meeting notes starting")
+        case .recording: notHearing ? ("Meeting · not hearing \(app)", "\(meetings.homeStatus), not hearing \(app)")
+            : ("Meeting · \(MeetingTime.short(elapsed))", "\(meetings.homeStatus), \(MeetingTime.spoken(elapsed))")
+        case .paused: ("Meeting paused", "\(meetings.homeStatus) at \(MeetingTime.spoken(elapsed))")
+        case .pausing: ("Meeting · pausing…", meetings.homeStatus)
+        case .finishing: ("Meeting · finishing…", meetings.homeStatus)
+        case .discarding, .idle, .finished: ("Meeting · discarding…", meetings.homeStatus)
+        }
+        let symbol = phase == .paused ? "pause.circle" : notHearing ? "speaker.slash" : meetings.listening ? "mic.fill" : "mic.slash"
+        let expansion: MeetingCapsuleContent.Expansion?
+        if meetingDictationRefused { expansion = .dictationRefused }
+        else if let reason = meetingPauseReason { expansion = .paused(reason) }
+        else if phase == .recording, elapsed - (meeting.stretches.last?.start ?? 0) < 60 { expansion = .firstMinute }
+        else { expansion = nil }
+        let finish: String? = switch (phase, expansion) {
+        case (.paused, .paused?): "Finish"
+        case (.paused, .dictationRefused?): "Finish meeting"
+        default: nil
+        }
+        return MeetingCapsuleContent(title: title, spokenTitle: spoken, symbol: symbol, warning: notHearing, sources: sources, expansion: expansion,
+                                     action: meetings.listening ? .pause : phase == .paused ? .resume : nil,
+                                     resumeTitle: meetings.needsAcknowledgment ? "Resume…" : "Resume", resumeBlocker: phase == .paused ? meetingStartBlocker : nil,
+                                     finishTitle: finish)
+    }
+    /// Why a paused meeting paused, from its last stretch, when Within paused it; a call's end is never described here.
+    var meetingPauseReason: String? {
+        guard meetings.phase == .paused, let meeting = meetings.meeting, let ended = meeting.stretches.last?.ended, ended != .callEnded else { return nil }
+        return MeetingWords.pauseReason(ended, appName: meeting.appName)
+    }
+    /// The status menu's meeting lines: the time, its spoken form, and what the meeting is doing.
+    var meetingMenuLines: (title: String, spoken: String, detail: String)? {
+        guard showsMeetingsSpace, meetings.isOpen else { return nil }
+        let elapsed = meetings.elapsed
+        let spoken = meetings.phase == .paused ? "\(meetings.homeStatus) at \(MeetingTime.spoken(elapsed))" : "\(meetings.homeStatus), \(MeetingTime.spoken(elapsed))"
+        // While Resume Meeting is unavailable, why.
+        let detail = meetings.listening ? MeetingWords.muteHint : (meetings.phase == .paused ? meetingStartBlocker : nil) ?? meetingPauseReason ?? meetings.homeStatus
+        return ("Meeting · \(MeetingTime.short(elapsed))", spoken, detail)
+    }
+    /// Pause from the capsule or the status menu.
+    func pauseOpenMeeting() { meetings.pause() }
+    /// Resume from outside the meeting screen. When the call may have changed, the screen's acknowledgment is shown
+    /// instead, since only it can give one; nothing resumes.
+    func resumeOpenMeeting() {
+        guard meetings.phase == .paused else { return }
+        guard meetings.needsAcknowledgment else { resumeMeeting(acknowledged: false); return }
+        showMeetings?()
+        meetingsFocusRequest = .acknowledgment
+    }
+    @discardableResult func finishOpenMeeting() -> Task<Bool, Never> { Task { await finishMeeting() } }
+    /// Within forward on the Meetings space: the open meeting, or the library with a recovered one to review.
+    func showOpenMeeting() { if showsMeetingsSpace { showMeetings?() } }
 
     // MARK: Updates
 
@@ -1405,7 +1650,17 @@ final class AppModel: ObservableObject {
         message = "Stop your note recording to dictate."; notify(); announce(message)
     }
     private func refuseDictationDuringMeeting() {
-        message = Self.meetingDictationRefusal; notify(); announce(message)
+        message = Self.meetingDictationRefusal
+        // The capsule says so for a few seconds; previews keep it until they are configured again.
+        meetingDictationRefused = true; dictationRefusalReset?.cancel()
+        if !previewMode {
+            dictationRefusalReset = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: Self.dictationRefusalShown)
+                guard let self, !Task.isCancelled else { return }
+                meetingDictationRefused = false; notify()
+            }
+        }
+        notify(); announce(message)
     }
     private func loadNotes() {
         guard let notesStore else { return }
@@ -1431,6 +1686,7 @@ final class AppModel: ObservableObject {
             announce(notesMessage); return
         }
         guard let id = session.begin() else { return }
+        meetingWatcher.captureStarted()
         recordingNoteID = noteID; isPracticeSession = false; pendingNoteGap = nil
         liveConfirmed = ""; liveVolatile = ""; notesMessage = ""
         target?.stopObserving(); target = nil; fromHoldShortcut = false; audioFlowing = false
@@ -1592,7 +1848,7 @@ final class AppModel: ObservableObject {
             MainActor.assumeIsolated { self?.cancelForBoundary(.userSwitched) }
         })
         for name in [NSWorkspace.sessionDidBecomeActiveNotification, NSWorkspace.didWakeNotification] {
-            observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.announceBoundaryPause() } })
+            observers.append(workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in MainActor.assumeIsolated { self?.boundaryEnded() } })
         }
         // Logout, restart or shutdown: an alert would wait while capture runs, so capture stops now and the meeting is
         // finished and saved. If the logout is canceled, Within stays open with the meeting finished.
@@ -1623,9 +1879,15 @@ final class AppModel: ObservableObject {
         memoryPressure?.resume()
     }
     @objc private func screenLocked() { cancelForBoundary() }
-    @objc private func screenUnlocked() { announceBoundaryPause() }
+    @objc private func screenUnlocked() { boundaryEnded() }
+    /// Unlock, wake or the session active again: reminders may offer again, and a meeting a boundary paused says so.
+    private func boundaryEnded() {
+        meetingWatcher.boundaryEnded()
+        announceBoundaryPause()
+    }
     func cancelForBoundary(_ reason: MeetingStretchEnd = .lockOrSleep) {
         clearLastDictationChange()
+        meetingWatcher.lockOrSleep()
         let meetingOpen = meetings.isOpen
         if meetingOpen, meetings.isCapturing { boundaryPause = (reason, meetings.phase == .preparing) }
         // Always: it also clears an acknowledgment checked in setup or for Continue, since the call may have changed.
@@ -1717,7 +1979,7 @@ final class AppModel: ObservableObject {
         if #available(macOS 14.2, *) { supported = true } else { supported = false }
         return MeetingDiagnostic(lastStretchEnd: end, sources: meetings.sourceStates[.others] == nil ? .microphone : .microphoneAndApp,
             youState: meetings.sourceStates[.you] ?? .off, othersState: meetings.sourceStates[.others] ?? .off,
-            startFailure: meetings.startFailure, computerAudioSupported: supported, remindersOn: false, lastSaveFailed: meetings.notSaved)
+            startFailure: meetings.startFailure, computerAudioSupported: supported, remindersOn: meetingRemindersActive, lastSaveFailed: meetings.notSaved)
     }
     /// Synthetic entries for previews and native checks only.
     static let previewWords = PersonalDictionary(entries: [
@@ -1756,8 +2018,15 @@ final class AppModel: ObservableObject {
         }
         meetingsRoute = .library; meetingLibrary = []; meetingLibraryUnreadable = 0; meetingsToReview = []; closedRecoveryNotices = []
         showingOriginalTranscription = false; includeZoomSound = false; meetingSetupFailure = nil; meetingsFocusRequest = nil
+        meetingReminders = false; zoomSoundEverIncluded = false; reminderExplaining = false; meetingStartSheet = false
+        meetingDictationRefused = false; dictationRefusalReset?.cancel()
+        meetingWatcher = MeetingWatcher(read: nil); observeMeetingWatcher()
         meetingAppSoundSupported = Self.appSoundAvailable
         if state.hasPrefix("meeting") || state == "home-during-meeting" { configureMeetingsPreview(state) }
+        if state.hasPrefix("meeting-reminder") || state.hasPrefix("meeting-menu-start-sheet") { configureReminderPreview(state) }
+        if state.hasPrefix("meeting-capsule") { configureCapsulePreview(state) }
+        // Native checks only: reminders stored on while the space is hidden.
+        if state == "reminders-on-space-hidden" { meetingReminders = true; updateMeetingWatcher() }
         if state.hasPrefix("settings-privacy-saved-meetings") { savedMeetingCount = 3 }
         if state == "settings-privacy-saved-meetings-days30" { meetingRetention = .days30 }
         // Hidden after the backups switch was turned on: the folder stays in backups, and Privacy says so.
@@ -1769,6 +2038,9 @@ final class AppModel: ObservableObject {
             showsMeetingsSpace = true
             meetingLibrary = [MeetingPreviews.finished, MeetingPreviews.recovered, MeetingPreviews.microphoneOnly, MeetingPreviews.oneOnOne]
             if state == "settings-meetings-backups" { meetingBackups = true; meetingRetention = .days90 }
+            if state.hasPrefix("settings-meetings-reminders") { meetingReminders = true }
+            if state == "settings-meetings-reminders-unsupported" { meetingAppSoundSupported = false }
+            updateMeetingWatcher()
         }
         if state == "settings-privacy-meetings-unlistable" { meetingsUnlistable = true }
         if state.hasSuffix("-dictionary") { previewDictionary(.loaded(Self.previewWords)) }
@@ -1821,8 +2093,10 @@ final class AppModel: ObservableObject {
         if state == "setup" { setupComplete = false }
         modelMessage = "One local model. No account."; shortcutAvailable = true
         if state == "model-error" { modelMessage = "Model unavailable. Remove it and download a fresh copy." }
-        if state == "missing-input" { devices = [] }
+        // "meeting-capsule-resume-blocked": the selected microphone was unplugged while the meeting was paused.
+        if state == "missing-input" || state == "meeting-capsule-resume-blocked" { devices = [] }
         if state == "permission" { accessibilityAllowed = false }
+        if state == "meeting-reminder-not-ready" { microphoneAllowed = false }
         if state == "practice" || state == "practice-dictionary" { practiceText = "A little more room for an ordinary idea."; isPracticeSession = true }
         if state == "practice-dictionary" { appendPractice(dictionaryMatcher.apply(to: "I moved the ticket to gira and asked shivon to review it.")) }
         if state == "inserted-dictionary" {
@@ -1887,6 +2161,40 @@ final class AppModel: ObservableObject {
         }
         if meetings.isOpen { meetingsRoute = .meeting; meetingLibrary.insert(meetings.meeting!, at: 0) }
     }
+    /// A reminder for a synthetic Zoom call, offered by the watcher from two synthetic readings; nothing is read or started.
+    private func configureReminderPreview(_ state: String) {
+        showsMeetingsSpace = true; meetingReminders = true; meetings.previewStartsAccepted = true
+        updateMeetingWatcher()
+        // "first": Zoom's sound was never included in this run.
+        includeZoomSound = !state.contains("-first")
+        if state == "meeting-reminder-while-paused" {
+            meetings.configurePreview(MeetingPreviews.paused(.pauseButton), phase: .paused, sourceStates: [.you: .off, .others: .off], elapsed: 754)
+        }
+        let call = [AudioClientSnapshot(bundleID: "us.zoom.xos", runningInput: true)]
+        for _ in 0..<2 { meetingWatcher.observe(call, now: Date(timeIntervalSince1970: 1_800_000_000)) }
+        reminderExplaining = state == "meeting-reminder-first-audio"
+        meetingStartSheet = state.hasPrefix("meeting-menu-start-sheet")
+    }
+    /// The capsule over a synthetic open meeting, as another app in front would see it; nothing is read or started.
+    /// Increase Contrast and Reduce Motion use the first minute's.
+    private func configureCapsulePreview(_ state: String) {
+        showsMeetingsSpace = true
+        let off: [MeetingSource: MeetingSourceState] = [.you: .off, .others: .off]
+        switch state {
+        case "meeting-capsule-paused", "meeting-capsule-dictation-refused-paused", "meeting-capsule-resume-blocked":
+            meetings.configurePreview(MeetingPreviews.paused(.pauseButton), phase: .paused, sourceStates: off, elapsed: 754)
+        case "meeting-capsule-after-unlock":
+            meetings.configurePreview(MeetingPreviews.paused(.lockOrSleep), phase: .paused, sourceStates: off, elapsed: 754, needsAcknowledgment: true)
+        case "meeting-capsule-source-lost":
+            meetings.configurePreview(MeetingPreviews.paused(.computerAudioLost), phase: .paused, sourceStates: [.you: .off, .others: .lost], elapsed: 754,
+                                      needsAcknowledgment: true)
+        default:
+            let firstMinute = ["meeting-capsule-first-minute", "meeting-capsule-increase-contrast", "meeting-capsule-reduce-motion"].contains(state)
+            meetings.configurePreview(MeetingPreviews.live, phase: .recording,
+                                      sourceStates: [.you: .live, .others: state == "meeting-capsule-not-hearing" ? .quiet : .live], elapsed: firstMinute ? 42 : 4324)
+        }
+        meetingDictationRefused = state.hasPrefix("meeting-capsule-dictation-refused")
+    }
     /// A synthetic meeting for previews and native checks only.
     static let previewMeeting = Meeting(id: UUID(uuidString: "6F1D2C3B-4A59-4E68-9F70-8192A3B4C5D6")!, title: "Weekly planning",
         created: Date(timeIntervalSince1970: 1_800_000_000), appName: "Zoom",
@@ -1896,6 +2204,7 @@ final class AppModel: ObservableObject {
     func shutdown() {
         // Before anything else, so quitting never leaves a meeting source running.
         meetings.emergencyStop()
+        meetingWatcher.update(on: false)
         flushNoteEdits(); cancel(cause: .shutdown); clearLastDictationChange(); practiceChange = nil
         restoreOutputIfNeeded(); modelTask?.cancel(); shortcut.shutdown()
     }
@@ -1934,6 +2243,7 @@ extension AppModel: MeetingHost {
 
     func claimCapture() -> UUID? {
         guard !workerBusy, !modelBusy, let id = session.begin() else { return nil }
+        meetingWatcher.captureStarted()
         // As for a note: no practice session, destination or hold gesture belongs to a meeting.
         isPracticeSession = false
         target?.stopObserving(); target = nil; fromHoldShortcut = false; audioFlowing = false
